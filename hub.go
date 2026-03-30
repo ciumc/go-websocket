@@ -5,31 +5,34 @@ import (
 	"sync"
 )
 
-// Hub maintains the set of active clients and broadcasts messages to the clients.
-// It acts as the central message broker for the WebSocket server.
-// It is safe for concurrent use by multiple goroutines.
+// Hub 维护活跃客户端集合并向客户端广播消息。
+// 它作为 WebSocket 服务器的中央消息代理。
+// 它可以安全地用于多个 goroutine 的并发访问。
 type Hub struct {
-	// clientsLock protects the clients map from concurrent access
+	// clientsLock 保护 clients map 免受并发访问
 	clientsLock sync.RWMutex
 
-	// clients is a map of registered clients keyed by their ID
+	// clients 是以客户端 ID 为键的已注册客户端映射
 	clients map[string]*Client
 
-	// broadcast is a channel for inbound messages from clients to be broadcast
+	// broadcast 是用于客户端入站消息广播的 channel
 	broadcast chan []byte
 
-	// register is a channel for client registration requests
+	// register 是客户端注册请求的 channel
 	register chan *Client
 
-	// unregister is a channel for client unregistration requests
+	// unregister 是客户端注销请求的 channel
 	unregister chan *Client
 
-	// done is a channel for signaling graceful shutdown
+	// done 是用于优雅关闭信号通知的 channel
 	done chan struct{}
+
+	// closeOnce 确保 done channel 只关闭一次
+	closeOnce sync.Once
 }
 
-// NewHub creates a new Hub instance with initialized channels and maps.
-// The hub is not started until Run() is called.
+// NewHub 创建一个新的 Hub 实例，初始化所有 channel 和 map。
+// Hub 在调用 Run() 之前不会启动。
 func NewHub() *Hub {
 	h := &Hub{
 		broadcast:   make(chan []byte, 100),
@@ -38,21 +41,22 @@ func NewHub() *Hub {
 		clients:     make(map[string]*Client),
 		clientsLock: sync.RWMutex{},
 		done:        make(chan struct{}),
+		closeOnce:   sync.Once{},
 	}
 	return h
 }
 
-// NewHubRun creates a new Hub and starts running it in a separate goroutine.
-// This is a convenience function that combines NewHub() and Run().
+// NewHubRun 创建一个新的 Hub 并在单独的 goroutine 中启动它。
+// 这是一个便利函数，结合了 NewHub() 和 Run()。
 func NewHubRun() *Hub {
 	h := NewHub()
 	go h.Run()
 	return h
 }
 
-// Client retrieves a client by ID.
-// It returns the client and a boolean indicating if the client was found.
-// This method is safe for concurrent use.
+// Client 根据 ID 获取客户端。
+// 返回客户端和一个表示是否找到该客户端的布尔值。
+// 此方法可安全地用于并发访问。
 func (h *Hub) Client(id string) (*Client, bool) {
 	h.clientsLock.RLock()
 	defer h.clientsLock.RUnlock()
@@ -60,15 +64,18 @@ func (h *Hub) Client(id string) (*Client, bool) {
 	return cli, ok
 }
 
-// Close gracefully shuts down the hub by closing the done channel.
-// This signals the Run() loop to stop and clean up resources.
+// Close 通过关闭 done channel 来优雅地关闭 Hub。
+// 这会向 Run() 循环发送信号以停止并清理资源。
+// 使用 sync.Once 确保 channel 只关闭一次，避免重复关闭 panic。
 func (h *Hub) Close() {
-	close(h.done)
+	h.closeOnce.Do(func() {
+		close(h.done)
+	})
 }
 
-// Broadcast sends a message to all connected clients.
-// The message is queued for delivery and sent asynchronously.
-// This method returns immediately, even if clients cannot receive the message.
+// Broadcast 向所有已连接的客户端发送消息。
+// 消息被排队等待异步发送。
+// 此方法立即返回，即使客户端无法接收消息。
 func (h *Hub) Broadcast(message []byte) {
 	select {
 	case h.broadcast <- message:
@@ -77,30 +84,41 @@ func (h *Hub) Broadcast(message []byte) {
 	}
 }
 
-// Run starts the hub's main event loop.
-// This function handles client registration, unregistration, and message broadcasting.
-// It should be called in a separate goroutine or use NewHubRun() instead.
-// The loop continues until Close() is called.
+// Run 启动 Hub 的主事件循环。
+// 此函数处理客户端注册、注销和消息广播。
+// 它应该在单独的 goroutine 中调用，或者使用 NewHubRun()。
+// 循环会持续运行直到 Close() 被调用。
 func (h *Hub) Run() {
 	defer func() {
 		if err := recover(); err != nil {
 			log.Printf("panic: %v", err)
 		}
 
-		// Close all client connections
+		// 关闭所有客户端连接
 		h.clientsLock.Lock()
 		for _, client := range h.clients {
 			delete(h.clients, client.id)
-			close(client.send)
-			_ = client.conn.Close()
+			client.closeSend()
+			if client.conn != nil {
+				_ = client.conn.Close()
+			}
 		}
 		h.clients = make(map[string]*Client)
 		h.clientsLock.Unlock()
 
-		// Close all channels
-		close(h.broadcast)
-		close(h.register)
-		close(h.unregister)
+		// 安全地关闭所有 channel（使用 recover 防止重复关闭 panic）
+		func() {
+			defer func() { recover() }()
+			close(h.broadcast)
+		}()
+		func() {
+			defer func() { recover() }()
+			close(h.register)
+		}()
+		func() {
+			defer func() { recover() }()
+			close(h.unregister)
+		}()
 	}()
 
 	for {
@@ -115,8 +133,10 @@ func (h *Hub) Run() {
 			h.clientsLock.Lock()
 			if _, ok := h.clients[client.id]; ok {
 				delete(h.clients, client.id)
-				close(client.send)
-				_ = client.conn.Close()
+				client.closeSend()
+				if client.conn != nil {
+					_ = client.conn.Close()
+				}
 			}
 			h.clientsLock.Unlock()
 		case message := <-h.broadcast:
@@ -130,12 +150,14 @@ func (h *Hub) Run() {
 				select {
 				case client.send <- message:
 				default:
-					// If client cannot receive message, it may have disconnected, remove it
+					// 如果客户端无法接收消息，可能已断开连接，移除它
 					h.clientsLock.Lock()
 					delete(h.clients, client.id)
 					h.clientsLock.Unlock()
-					close(client.send)
-					_ = client.conn.Close()
+					client.closeSend()
+					if client.conn != nil {
+						_ = client.conn.Close()
+					}
 				}
 			}
 		}

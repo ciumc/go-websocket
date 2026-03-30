@@ -1,22 +1,22 @@
 package websocket
 
 import (
-	"context"
-	clientv3 "go.etcd.io/etcd/client/v3"
 	"time"
+
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
-// NewEtcdClient creates a new etcd client with the specified endpoints.
-// It initializes the client with a dial timeout of 5 seconds.
+// NewEtcdClient 使用指定的端点创建一个新的 etcd 客户端。
+// 使用 5 秒的拨号超时时间初始化客户端。
 //
-// Parameters:
-//   - endpoints: A slice of strings representing the etcd server addresses
+// 参数:
+//   - endpoints: 表示 etcd 服务器地址的字符串切片
 //
-// Returns:
-//   - *clientv3.Client: A pointer to the created etcd client
-//   - error: An error if client creation fails, nil otherwise
+// 返回值:
+//   - *clientv3.Client: 指向创建的 etcd 客户端的指针
+//   - error: 如果客户端创建失败则返回错误，否则为 nil
 func NewEtcdClient(endpoints []string) (*clientv3.Client, error) {
-	// Create a new etcd client with the provided configuration
+	// 使用提供的配置创建新的 etcd 客户端
 	cli, err := clientv3.New(clientv3.Config{
 		Endpoints:   endpoints,
 		DialTimeout: 5 * time.Second,
@@ -47,15 +47,6 @@ func NewEtcdStorage(client *clientv3.Client, prefix string) *EtcdStorage {
 	}
 }
 
-// contextTimeout 创建一个具有超时控制的上下文。
-// 默认超时时间为 2 秒。
-// 返回值:
-//   - context.Context: 带有超时的上下文
-//   - context.CancelFunc: 取消该上下文的函数
-func (s *EtcdStorage) contextTimeout() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), 2*time.Second)
-}
-
 // Set 将指定的键值对存入 etcd 中。
 // 参数:
 //   - key: 不带前缀的键名
@@ -64,7 +55,7 @@ func (s *EtcdStorage) contextTimeout() (context.Context, context.CancelFunc) {
 // 返回值:
 //   - error: 操作过程中发生的错误（如果有）
 func (s *EtcdStorage) Set(key string, value string) error {
-	ctx, cancel := s.contextTimeout()
+	ctx, cancel := contextTimeout()
 	defer cancel()
 	_, err := s.client.Put(ctx, s.prefix+key, value)
 	return err
@@ -78,7 +69,7 @@ func (s *EtcdStorage) Set(key string, value string) error {
 //   - string: 对应的值；如果键不存在则返回空字符串
 //   - error: 操作过程中发生的错误（如果有）
 func (s *EtcdStorage) Get(key string) (string, error) {
-	ctx, cancel := s.contextTimeout()
+	ctx, cancel := contextTimeout()
 	resp, err := s.client.Get(ctx, s.prefix+key)
 	cancel()
 	if err != nil {
@@ -97,7 +88,7 @@ func (s *EtcdStorage) Get(key string) (string, error) {
 // 返回值:
 //   - error: 操作过程中发生的错误（如果有）
 func (s *EtcdStorage) Del(keys ...string) error {
-	ctx, cancel := s.contextTimeout()
+	ctx, cancel := contextTimeout()
 	defer cancel()
 	for _, key := range keys {
 		_, err := s.client.Delete(ctx, s.prefix+key)
@@ -110,29 +101,26 @@ func (s *EtcdStorage) Del(keys ...string) error {
 
 // Clear 根据主机标识清理其下的所有相关键。
 // 参数:
-//   - host: 主机标识符，将删除以 "/prefix/host/" 开头的所有键
+//   - host: 主机标识符，将删除匹配该主机的所有键
 //
 // 返回值:
 //   - error: 操作过程中发生的错误（如果有）
 func (s *EtcdStorage) Clear(host string) error {
-	all, err := s.All()
-	if err != nil {
-		return err
-	}
-	remove := make([]string, 0, len(all))
-	for id, addr := range all {
-		if addr != host {
-			continue
-		}
-		remove = append(remove, id)
-	}
-	if len(remove) == 0 {
-		return nil
-	}
-	ctx, cancel := s.contextTimeout()
+	return clearHelper(s, host, s.delKeys)
+}
+
+// delKeys 是 EtcdStorage 特有的删除键的实现。
+// 逐个删除键，因为 etcd 不支持批量删除。
+// 参数:
+//   - keys: 要删除的键列表
+//
+// 返回值:
+//   - error: 删除过程中发生的错误（如果有）
+func (s *EtcdStorage) delKeys(keys []string) error {
+	ctx, cancel := contextTimeout()
 	defer cancel()
-	for _, key := range remove {
-		if _, err = s.client.Delete(ctx, s.prefix+key); err != nil {
+	for _, key := range keys {
+		if _, err := s.client.Delete(ctx, s.prefix+key); err != nil {
 			return err
 		}
 	}
@@ -145,7 +133,7 @@ func (s *EtcdStorage) Clear(host string) error {
 //   - error: 操作过程中发生的错误（如果有）
 func (s *EtcdStorage) All() (map[string]string, error) {
 	result := make(map[string]string)
-	ctx, cancel := s.contextTimeout()
+	ctx, cancel := contextTimeout()
 	resp, err := s.client.Get(ctx, s.prefix, clientv3.WithPrefix())
 	cancel()
 	if err != nil {

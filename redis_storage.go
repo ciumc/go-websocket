@@ -3,8 +3,8 @@ package websocket
 import (
 	"context"
 	"errors"
+
 	"github.com/go-redis/redis/v8"
-	"time"
 )
 
 // NewRedisClient 创建一个新的Redis客户端实例
@@ -38,7 +38,13 @@ type RedisStorage struct {
 	prefix string
 }
 
-// NewRedisStorage creates a new RedisStorage instance with the given Redis client and key prefix.
+// NewRedisStorage 使用给定的 Redis 客户端和键前缀创建一个新的 RedisStorage 实例。
+// 参数:
+//   - redisClient: Redis 客户端实例
+//   - prefix: Redis 哈希键的前缀
+//
+// 返回值:
+//   - *RedisStorage: 新创建的 RedisStorage 实例
 func NewRedisStorage(redisClient *redis.Client, prefix string) *RedisStorage {
 	return &RedisStorage{
 		client: redisClient,
@@ -46,23 +52,31 @@ func NewRedisStorage(redisClient *redis.Client, prefix string) *RedisStorage {
 	}
 }
 
-func (s *RedisStorage) contextTimeout() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), 2*time.Second)
-}
-
-// Set stores a key-value pair in Redis with a 2-second timeout.
-// It uses HSet to store the data in a Redis hash.
+// Set 在 Redis 中存储键值对，使用 2 秒超时。
+// 使用 HSet 将数据存储在 Redis 哈希中。
+// 参数:
+//   - key: 要存储的键
+//   - value: 要存储的值
+//
+// 返回值:
+//   - error: 操作过程中发生的错误（如果有）
 func (s *RedisStorage) Set(key string, value string) error {
-	ctx, cancel := s.contextTimeout()
+	ctx, cancel := contextTimeout()
 	defer cancel()
 	return s.client.HSet(ctx, s.prefix, key, value).Err()
 }
 
-// Get retrieves the value for a key from Redis with a 2-second timeout.
-// It uses HGet to retrieve data from a Redis hash.
-// Returns an empty string and no error if the key does not exist.
+// Get 从 Redis 检索键对应的值，使用 2 秒超时。
+// 使用 HGet 从 Redis 哈希中检索数据。
+// 如果键不存在，返回空字符串且不返回错误。
+// 参数:
+//   - key: 要检索的键
+//
+// 返回值:
+//   - string: 对应的值；如果键不存在则返回空字符串
+//   - error: 操作过程中发生的错误（如果有）
 func (s *RedisStorage) Get(key string) (string, error) {
-	ctx, cancel := s.contextTimeout()
+	ctx, cancel := contextTimeout()
 	value, err := s.client.HGet(ctx, s.prefix, key).Result()
 	cancel()
 	if errors.Is(err, redis.Nil) {
@@ -71,43 +85,53 @@ func (s *RedisStorage) Get(key string) (string, error) {
 	return value, err
 }
 
-// Del removes one or more keys from Redis with a 2-second timeout.
-// It uses HDel to remove fields from a Redis hash.
-// It does not return an error if a key does not exist.
+// Del 从 Redis 中删除一个或多个键，使用 2 秒超时。
+// 使用 HDel 从 Redis 哈希中删除字段。
+// 如果键不存在，不返回错误。
+// 参数:
+//   - key: 要删除的一个或多个键
+//
+// 返回值:
+//   - error: 操作过程中发生的错误（如果有）
 func (s *RedisStorage) Del(key ...string) error {
-	ctx, cancel := s.contextTimeout()
+	ctx, cancel := contextTimeout()
 	defer cancel()
 	return s.client.HDel(ctx, s.prefix, key...).Err()
 }
 
-// Clear removes all entries for a specific host from Redis with a 2-second timeout.
-// It first retrieves all entries, identifies those matching the host, and removes them.
-// This is used to clean up when a server node shuts down.
+// Clear 从 Redis 中删除特定主机的所有条目，使用 2 秒超时。
+// 首先检索所有条目，识别匹配主机的条目并删除它们。
+// 用于服务器节点关闭时清理。
+// 参数:
+//   - host: 要清理的主机标识符
+//
+// 返回值:
+//   - error: 操作过程中发生的错误（如果有）
 func (s *RedisStorage) Clear(host string) error {
-	all, err := s.All()
-	if err != nil {
-		return err
-	}
-	remove := make([]string, 0, len(all))
-	for id, addr := range all {
-		if addr != host {
-			continue
-		}
-		remove = append(remove, id)
-	}
-	if len(remove) == 0 {
-		return nil
-	}
-	ctx, cancel := s.contextTimeout()
-	defer cancel()
-	return s.client.HDel(ctx, s.prefix, remove...).Err()
+	return clearHelper(s, host, s.delKeys)
 }
 
-// All retrieves all key-value pairs from Redis with a 2-second timeout.
-// It uses HGetAll to retrieve all fields and values from a Redis hash.
-// Returns nil and no error if no entries exist.
+// delKeys 是 RedisStorage 特有的删除键的实现。
+// 使用 HDel 命令一次性删除多个字段。
+// 参数:
+//   - keys: 要删除的键列表
+//
+// 返回值:
+//   - error: 操作过程中发生的错误（如果有）
+func (s *RedisStorage) delKeys(keys []string) error {
+	ctx, cancel := contextTimeout()
+	defer cancel()
+	return s.client.HDel(ctx, s.prefix, keys...).Err()
+}
+
+// All 从 Redis 检索所有键值对，使用 2 秒超时。
+// 使用 HGetAll 从 Redis 哈希中检索所有字段和值。
+// 如果没有条目存在，返回 nil 且不返回错误。
+// 返回值:
+//   - map[string]string: 包含所有键值对的映射表
+//   - error: 操作过程中发生的错误（如果有）
 func (s *RedisStorage) All() (map[string]string, error) {
-	ctx, cancel := s.contextTimeout()
+	ctx, cancel := contextTimeout()
 	values, err := s.client.HGetAll(ctx, s.prefix).Result()
 	cancel()
 	if errors.Is(err, redis.Nil) {

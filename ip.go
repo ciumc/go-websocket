@@ -6,18 +6,18 @@ import (
 )
 
 var (
-	// _ip stores the local IP address once it has been determined
+	// _ip 存储已确定的本地 IP 地址
 	_ip net.IP
 
-	// _ipOnce ensures the IP address is only determined once
+	// _ipOnce 确保 IP 地址只被确定一次
 	_ipOnce sync.Once
 )
 
-// IP returns the local IP address of the machine.
-// It looks for the first non-loopback IPv4 address available on the system.
-// The result is cached, so subsequent calls return the same value.
-// @Description: Get local IP address
-// @return net.IP The local IP address, or nil if none could be determined
+// IP 返回本机的本地 IP 地址。
+// 它会查找系统上第一个可用的非回环 IPv4 地址。
+// 结果被缓存，因此后续调用返回相同的值。
+// @Description: 获取本地 IP 地址
+// @return net.IP 本地 IP 地址，如果无法确定则返回 nil
 func IP() net.IP {
 	_ipOnce.Do(func() {
 		as, _ := net.InterfaceAddrs()

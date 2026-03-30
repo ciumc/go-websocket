@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,89 +16,99 @@ import (
 )
 
 const (
-	// writeWait is the time allowed to write a message to the peer.
+	// writeWait 是向对等方写入消息的时间限制。
 	writeWait = 10 * time.Second
 
-	// pongWait is the time allowed to read the next pong message from the peer.
+	// pongWait 是从对等方读取下一个 pong 消息的时间限制。
 	pongWait = 60 * time.Second
 
-	// pingPeriod is the period to send pings to peer. Must be less than pongWait.
+	// pingPeriod 是向对等方发送 ping 的周期。必须小于 pongWait。
 	pingPeriod = (pongWait * 9) / 10
 
-	// maxMessageSize is the maximum message size allowed from peer.
+	// maxMessageSize 是允许从对等方接收的最大消息大小。
 	maxMessageSize = 512
 
-	// bufSize is the send buffer size for outbound messages.
+	// bufSize 是出站消息的发送缓冲区大小。
 	bufSize = 256
 )
 
 var (
-	// newline represents a newline character as bytes.
+	// newline 表示换行符的字节形式。
 	newline = []byte{'\n'}
 
-	// space represents a space character as bytes.
+	// space 表示空格字符的字节形式。
 	space = []byte{' '}
 )
 
-// upgrader is used to upgrade HTTP connections to WebSocket connections.
-// It sets buffer sizes and allows all origins for CORS.
+// upgrader 用于将 HTTP 连接升级为 WebSocket 连接。
+// 它设置缓冲区大小并允许所有来源的 CORS。
+// 注意：可以使用 WithCheckOrigin 选项自定义跨域检查逻辑。
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin:     func(r *http.Request) bool { return true },
 }
 
-// Client represents a WebSocket client connection.
-// It manages the connection lifecycle, message sending/receiving, and event callbacks.
+// Client 表示一个 WebSocket 客户端连接。
+// 它管理连接生命周期、消息发送/接收和事件回调。
 type Client struct {
-	// hub manages all active clients and broadcasts messages
+	// hub 管理所有活跃客户端并广播消息
 	hub *Hub
 
-	// conn is the underlying WebSocket connection
+	// conn 是底层的 WebSocket 连接
 	conn *websocket.Conn
 
-	// send is a buffered channel for outbound messages
+	// send 是用于出站消息的缓冲 channel
 	send chan []byte
 
-	// id uniquely identifies the client
+	// id 唯一标识客户端
 	id string
 
-	// Event callbacks for handling connection events
+	// closeOnce 确保 send channel 只关闭一次
+	closeOnce sync.Once
+
+	// 用于处理连接事件的事件回调
 	onEvent      func(conn *Client, messageType int, message []byte)
 	onConnect    func(conn *Client)
 	onError      func(id string, err error)
 	onDisconnect func(id string)
 }
 
-// Emit sends a message to the client.
-// It returns false if the client is closed or the send buffer is full.
-// This method is safe for concurrent use.
+// Emit 向客户端发送消息。
+// 如果客户端已关闭或发送缓冲区已满，则返回 false。
+// 此方法可安全地用于并发使用。
 func (c *Client) Emit(message []byte) bool {
 	select {
 	case c.send <- message:
 		return true
 	default:
-		// Send buffer is full, return failure
+		// 发送缓冲区已满，返回失败
 		return false
 	}
 }
 
-// Broadcast sends a message to all connected clients through the hub.
-// The message will be queued for delivery to all clients except the sender.
+// closeSend 安全地关闭 send channel，使用 sync.Once 防止重复关闭。
+func (c *Client) closeSend() {
+	c.closeOnce.Do(func() {
+		close(c.send)
+	})
+}
+
+// Broadcast 通过 hub 向所有已连接客户端发送消息。
+// 消息将被排队等待传递给所有客户端。
 func (c *Client) Broadcast(message []byte) {
 	c.hub.Broadcast(message)
 }
 
-// GetID returns the unique identifier of this client.
-// The ID is generated when the client is created and remains constant
-// throughout the lifetime of the connection.
+// GetID 返回此客户端的唯一标识符。
+// ID 在创建客户端时生成，并在连接生命周期内保持不变。
 func (c *Client) GetID() string {
 	return c.id
 }
 
-// reader reads messages from the WebSocket connection in a loop.
-// It handles pong messages and processes incoming messages.
-// If any error occurs, it unregisters the client from the hub.
+// reader 循环从 WebSocket 连接读取消息。
+// 它处理 pong 消息并处理传入的消息。
+// 如果发生任何错误，它会从 hub 注销客户端。
 func (c *Client) reader() {
 	defer func() {
 		c.hub.unregister <- c
@@ -106,16 +117,16 @@ func (c *Client) reader() {
 		}
 	}()
 
-	// Set message size limit
+	// 设置消息大小限制
 	c.conn.SetReadLimit(maxMessageSize)
 
-	// Set initial read timeout
+	// 设置初始读取超时
 	if err := c.conn.SetReadDeadline(time.Now().Add(pongWait)); err != nil {
 		c.error(err)
 		return
 	}
 
-	// Set pong handler
+	// 设置 pong 处理器
 	c.conn.SetPongHandler(func(string) error {
 		return c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	})
@@ -135,9 +146,9 @@ func (c *Client) reader() {
 	}
 }
 
-// writer handles writing messages to the WebSocket connection.
-// It sends messages from the send channel and pings the client periodically.
-// It ensures proper cleanup when the writer stops.
+// writer 处理向 WebSocket 连接写入消息。
+// 它从 send channel 发送消息并定期 ping 客户端。
+// 它确保在 writer 停止时进行适当的清理。
 func (c *Client) writer() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
@@ -153,34 +164,34 @@ func (c *Client) writer() {
 	for {
 		select {
 		case message, ok := <-c.send:
-			// Set write timeout
-			if err := c.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
+			// 设置写入超时
+			if err := c.setWriteDeadline(); err != nil {
 				c.error(err)
 				return
 			}
 
 			if !ok {
-				// Channel is closed, send close message
+				// channel 已关闭，发送关闭消息
 				if err := c.conn.WriteMessage(websocket.CloseMessage, []byte{}); err != nil && !errors.Is(err, websocket.ErrCloseSent) {
 					c.error(err)
 				}
 				return
 			}
 
-			// Get writer
+			// 获取 writer
 			w, err := c.conn.NextWriter(websocket.TextMessage)
 			if err != nil {
 				c.error(err)
 				return
 			}
 
-			// Write current message
+			// 写入当前消息
 			if _, err := w.Write(message); err != nil {
 				c.error(err)
 				return
 			}
 
-			// Write other messages from queue
+			// 写入队列中的其他消息
 			n := len(c.send)
 			for i := 0; i < n; i++ {
 				if _, err := w.Write(newline); err != nil {
@@ -194,15 +205,15 @@ func (c *Client) writer() {
 				}
 			}
 
-			// Close writer
+			// 关闭 writer
 			if err := w.Close(); err != nil {
 				c.error(err)
 				return
 			}
 
 		case <-ticker.C:
-			// Send ping message
-			if err := c.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
+			// 发送 ping 消息
+			if err := c.setWriteDeadline(); err != nil {
 				c.error(err)
 				return
 			}
@@ -214,30 +225,48 @@ func (c *Client) writer() {
 	}
 }
 
-// Option is a function that configures a Client.
-// It follows the functional options pattern for flexible client configuration.
+// setWriteDeadline 设置写入截止时间。
+func (c *Client) setWriteDeadline() error {
+	return c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+}
+
+// Option 是一个配置 Client 的函数。
+// 它遵循函数式选项模式以实现灵活的客户端配置。
 type Option func(c *Client)
 
-// WithID sets the client ID.
-// If not provided, a UUID will be generated automatically.
-// @Description: Set client ID
-// @param id The client ID to set
-// @return Option A function that sets the client ID
+// WithID 设置客户端 ID。
+// 如果未提供，将自动生成 UUID。
 func WithID(id string) Option {
 	return func(c *Client) {
 		c.id = id
 	}
 }
 
-// NewClient creates a new Client instance with the given hub and options.
-// If no ID is provided via options, a UUID will be generated.
-// The client is not connected until Conn() is called.
-// @Description: Create client
-// @param hub The hub to register the client with
-// @param opts Optional configuration functions
-// @return *Client A new Client instance
-func NewClient(hub *Hub, opts ...Option) *Client {
+// WithBufSize 设置 send channel 的缓冲区大小。
+// 必须在 NewClient 之前调用，因为 channel 在创建后无法更改大小。
+func WithBufSize(size int) Option {
+	return func(c *Client) {
+		// 注意：这里只是标记，实际的 channel 创建在 NewClient 中处理
+		// 由于 channel 已经创建，我们需要重新创建它
+		if size > 0 {
+			c.send = make(chan []byte, size)
+		}
+	}
+}
 
+// WithCheckOrigin 设置 WebSocket upgrader 的 CheckOrigin 函数。
+// 用于自定义跨域检查逻辑。默认允许所有来源（return true）。
+func WithCheckOrigin(fn func(r *http.Request) bool) Option {
+	return func(c *Client) {
+		// 修改全局 upgrader 的 CheckOrigin
+		upgrader.CheckOrigin = fn
+	}
+}
+
+// NewClient 使用给定的 hub 和选项创建一个新的 Client 实例。
+// 如果未通过选项提供 ID，将生成 UUID。
+// 客户端在调用 Conn() 之前不会连接。
+func NewClient(hub *Hub, opts ...Option) *Client {
 	cli := &Client{
 		hub:  hub,
 		send: make(chan []byte, bufSize),
@@ -254,34 +283,34 @@ func NewClient(hub *Hub, opts ...Option) *Client {
 	return cli
 }
 
-// Conn upgrades the HTTP connection to a WebSocket connection and starts the client.
-// It handles:
-// - Upgrading the HTTP connection to WebSocket
-// - Registering the client with the hub
-// - Starting reader and writer goroutines
-// - Triggering the OnConnect callback
+// Conn 将 HTTP 连接升级为 WebSocket 连接并启动客户端。
+// 它处理：
+// - 将 HTTP 连接升级为 WebSocket
+// - 向 hub 注册客户端
+// - 启动 reader 和 writer goroutine
+// - 触发 OnConnect 回调
 //
-// Parameters:
-// - w: the HTTP response writer
-// - r: the HTTP request
+// 参数：
+// - w: HTTP 响应写入器
+// - r: HTTP 请求
 //
-// Returns an error if the connection upgrade fails.
+// 如果连接升级失败则返回错误。
 func (c *Client) Conn(w http.ResponseWriter, r *http.Request) error {
-	// Upgrade HTTP connection to WebSocket
+	// 将 HTTP 连接升级为 WebSocket
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return err
 	}
 
-	// Set connection and register client
+	// 设置连接并注册客户端
 	c.conn = conn
 	c.hub.register <- c
 
-	// Start reader and writer goroutines
+	// 启动 reader 和 writer goroutine
 	go c.writer()
 	go c.reader()
 
-	// Trigger connect callback
+	// 触发连接回调
 	if c.onConnect != nil {
 		c.onConnect(c)
 	}
@@ -289,7 +318,7 @@ func (c *Client) Conn(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// error handles errors for the client by calling the error callback or logging.
+// error 通过调用错误回调或记录来处理客户端的错误。
 func (c *Client) error(err error) {
 	if c.onError != nil {
 		c.onError(c.id, err)
@@ -299,33 +328,33 @@ func (c *Client) error(err error) {
 	}
 }
 
-// OnEvent sets the callback for handling incoming WebSocket messages.
-// The callback receives:
-// - conn: the client that received the message
-// - messageType: the WebSocket message type (text/binary)
-// - message: the message payload
+// OnEvent 设置用于处理传入 WebSocket 消息的回调。
+// 回调接收：
+// - conn: 接收消息的客户端
+// - messageType: WebSocket 消息类型（文本/二进制）
+// - message: 消息负载
 func (c *Client) OnEvent(handler func(conn *Client, messageType int, message []byte)) {
 	c.onEvent = handler
 }
 
-// OnConnect sets the callback for when a WebSocket connection is established.
-// The callback receives:
-// - conn: the newly connected client
+// OnConnect 设置 WebSocket 连接建立时的回调。
+// 回调接收：
+// - conn: 新连接的客户端
 func (c *Client) OnConnect(handler func(conn *Client)) {
 	c.onConnect = handler
 }
 
-// OnError sets the callback for handling WebSocket errors.
-// The callback receives:
-// - id: the client ID where the error occurred
-// - err: the error that occurred
+// OnError 设置处理 WebSocket 错误的回调。
+// 回调接收：
+// - id: 发生错误的客户端 ID
+// - err: 发生的错误
 func (c *Client) OnError(handler func(id string, err error)) {
 	c.onError = handler
 }
 
-// OnDisconnect sets the callback for when a WebSocket connection is closed.
-// The callback receives:
-// - id: the ID of the client that disconnected
+// OnDisconnect 设置 WebSocket 连接关闭时的回调。
+// 回调接收：
+// - id: 断开连接的客户端 ID
 func (c *Client) OnDisconnect(handler func(id string)) {
 	c.onDisconnect = handler
 }
