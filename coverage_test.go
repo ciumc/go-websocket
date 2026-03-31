@@ -144,4 +144,3 @@ func TestSessionWithAllOptions(t *testing.T) {
 		t.Errorf("MaxMessageSize = %v, want 2048", cfg.MaxMessageSize)
 	}
 }
-

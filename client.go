@@ -118,9 +118,19 @@ func (c *Client) GetID() string {
 // 它处理 pong 消息并处理传入的消息。
 // 如果发生任何错误，它会从 hub 注销客户端。
 // reader 在独立的 goroutine 中运行，退出时触发客户端注销。
+//
+// 并发安全: 使用 select 检查 Hub 是否已关闭，避免向已关闭的 channel 发送。
 func (c *Client) reader() {
 	defer func() {
-		c.hub.unregister <- c
+		// 安全地向 unregister channel 发送
+		// 检查 Hub 是否已关闭，避免向已关闭的 channel 发送导致 panic
+		if !c.hub.closed.Load() {
+			select {
+			case c.hub.unregister <- c:
+			case <-c.hub.done:
+				// Hub 已关闭，无需注销
+			}
+		}
 		if err := recover(); err != nil {
 			c.error(fmt.Errorf("panic: %v", err))
 		}

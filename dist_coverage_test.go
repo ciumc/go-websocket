@@ -95,7 +95,6 @@ func TestDistClientBroadcastWithMultipleAddresses(t *testing.T) {
 	t.Logf("Broadcast count: %d", count)
 }
 
-
 // TestDistServerWithMockHub 测试 DistServer 方法
 func TestDistServerWithMockHub(t *testing.T) {
 	hub := NewHubRun()

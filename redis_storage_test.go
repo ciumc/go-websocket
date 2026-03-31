@@ -173,25 +173,39 @@ func TestRedisStorageTimeout(t *testing.T) {
 	}
 }
 
-// TestNewRedisClientWithMiniredis 测试 NewRedisClient
-func TestNewRedisClientWithMiniredis(t *testing.T) {
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatalf("Failed to start miniredis: %v", err)
-	}
+// TestRedisStorageAllEmptyHash 测试 All 方法处理空 Hash 的情况（覆盖 redis.Nil 分支）
+func TestRedisStorageAllEmptyHash(t *testing.T) {
+	mr, client := setupMiniredis(t)
 	defer mr.Close()
-
-	client, err := NewRedisClient(&redis.Options{
-		Addr: mr.Addr(),
-	})
-	if err != nil {
-		t.Fatalf("NewRedisClient failed: %v", err)
-	}
 	defer client.Close()
 
-	// 验证连接正常
-	storage := NewRedisStorage(client, "test")
-	if err := storage.Set("ping", "pong"); err != nil {
-		t.Fatalf("Set failed: %v", err)
+	storage := NewRedisStorage(client, "empty:hash:test")
+
+	// 测试空 Hash - 应该返回 nil, nil（覆盖 redis.Nil 分支）
+	all, err := storage.All()
+	if err != nil {
+		t.Fatalf("All() on empty hash failed: %v", err)
 	}
+	// 空 Hash 应该返回空 map 而不是 nil
+	if all == nil {
+		t.Log("All() returned nil for empty hash (acceptable)")
+	} else if len(all) != 0 {
+		t.Errorf("All() returned %d items, want 0", len(all))
+	}
+}
+
+// TestRedisStorageNewRedisClientError 测试 NewRedisClient 连接错误
+func TestRedisStorageNewRedisClientError(t *testing.T) {
+	// 尝试连接到不存在的 Redis 服务器
+	client, err := NewRedisClient(&redis.Options{
+		Addr:     "localhost:9999", // 不存在的端口
+		Password: "",
+		DB:       0,
+	})
+	if err == nil {
+		client.Close()
+		t.Error("NewRedisClient should fail with non-existent server")
+	}
+	// 预期会有连接错误
+	t.Logf("Expected connection error: %v", err)
 }

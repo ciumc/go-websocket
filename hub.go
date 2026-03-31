@@ -1,3 +1,32 @@
+// Package websocket 提供分布式 WebSocket 服务框架。
+//
+// 该包支持单节点和分布式部署，通过 Redis/Etcd 存储客户端连接信息，
+// 利用 gRPC 实现跨节点消息传递。
+//
+// 主要组件:
+//   - Hub: 中央消息代理，管理活跃客户端连接
+//   - Session: 统一会话入口，自动检测单节点/分布式模式
+//   - Client: WebSocket 客户端连接管理
+//   - DistClient/DistServer: 分布式通信组件
+//   - Storage: 存储接口抽象（支持 Redis/Etcd）
+//
+// 快速开始:
+//
+//	// 单节点模式
+//	hub := websocket.NewHubRun()
+//	defer hub.Close()
+//
+//	session := websocket.NewSession(hub)
+//	session.OnEvent(func(conn *websocket.Client, messageType int, message []byte) {
+//	    conn.Emit([]byte("echo: " + string(message)))
+//	})
+//
+//	// 分布式模式
+//	storage := websocket.NewRedisStorage(redisClient, "prefix")
+//	session := websocket.NewSession(hub,
+//	    websocket.WithStorage(storage),
+//	    websocket.WithAddr("192.168.1.1:8080"),
+//	)
 package websocket
 
 import (

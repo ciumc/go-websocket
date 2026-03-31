@@ -275,7 +275,6 @@ func TestGrpcPoolCleanExpiredWithConnections(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 }
 
-
 // TestEtcdStorageWithMock 测试 Etcd 存储接口（使用 mock）
 func TestEtcdStorageWithMock(t *testing.T) {
 	// 使用 MockEtcdStorage 测试接口实现
@@ -334,4 +333,220 @@ func TestEtcdStorageWithMock(t *testing.T) {
 		}
 		t.Logf("All returned %d items", len(all))
 	})
+}
+
+// TestSessionConnFullFlow 测试 Session.Conn 完整流程（提升覆盖率）
+func TestSessionConnFullFlow(t *testing.T) {
+	hub := NewHubRun()
+	defer hub.Close()
+
+	t.Run("standalone mode success", func(t *testing.T) {
+		connectCalled := make(chan bool, 1)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			session := NewSession(hub, WithSessionID("standalone-flow-test"))
+			session.OnConnect(func(conn *Client) {
+				connectCalled <- true
+			})
+
+			if err := session.Conn(w, r); err != nil {
+				t.Logf("Conn error: %v", err)
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}))
+		defer server.Close()
+
+		wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+		wsConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			t.Fatalf("Dial failed: %v", err)
+		}
+		defer wsConn.Close()
+
+		select {
+		case <-connectCalled:
+			t.Log("OnConnect called successfully")
+		case <-time.After(200 * time.Millisecond):
+			t.Log("OnConnect timeout (acceptable)")
+		}
+	})
+
+	t.Run("distributed mode success", func(t *testing.T) {
+		storage := NewMockStorage()
+		connectCalled := make(chan bool, 1)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			session := NewSession(hub,
+				WithStorage(storage),
+				WithAddr("192.168.1.1:8080"),
+				WithSessionID("dist-flow-test"),
+			)
+			session.OnConnect(func(conn *Client) {
+				connectCalled <- true
+			})
+
+			if err := session.Conn(w, r); err != nil {
+				t.Logf("Conn error: %v", err)
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}))
+		defer server.Close()
+
+		wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+		wsConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			t.Fatalf("Dial failed: %v", err)
+		}
+		defer wsConn.Close()
+
+		select {
+		case <-connectCalled:
+			t.Log("OnConnect called successfully in distributed mode")
+		case <-time.After(200 * time.Millisecond):
+			t.Log("OnConnect timeout (acceptable)")
+		}
+	})
+}
+
+// TestDistClientCallRemoteContextError 测试 callRemote 处理 context 错误
+func TestDistClientCallRemoteContextError(t *testing.T) {
+	storage := NewMockStorage()
+	_ = storage.Set("test-id", "192.168.1.1:8080")
+
+	client := NewDistClient(storage, WithDistTimeout(100*time.Millisecond))
+	defer client.Close()
+
+	// 创建已取消的 context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	ok, err := client.Emit(ctx, "test-id", []byte("test"))
+	if err == nil {
+		t.Error("Emit should return error when context is cancelled")
+	}
+	if !strings.Contains(err.Error(), "context cancelled") {
+		t.Errorf("Error should contain 'context cancelled', got: %v", err)
+	}
+	if ok {
+		t.Error("Emit should return false when context is cancelled")
+	}
+}
+
+// TestDistClientEmitStorageGetError 测试 Emit 存储获取错误
+func TestDistClientEmitStorageGetError(t *testing.T) {
+	storage := &errorStorage{}
+	client := NewDistClient(storage)
+	defer client.Close()
+
+	ctx := context.Background()
+	ok, err := client.Emit(ctx, "test-id", []byte("test"))
+
+	if err == nil {
+		t.Error("Emit should return error when storage.Get fails")
+	}
+	if !strings.Contains(err.Error(), "storage get") {
+		t.Errorf("Error should contain 'storage get', got: %v", err)
+	}
+	if ok {
+		t.Error("Emit should return false when storage fails")
+	}
+}
+
+// TestDistClientBroadcastPartialFailure 测试 Broadcast 部分节点失败
+func TestDistClientBroadcastPartialFailure(t *testing.T) {
+	storage := NewMockStorage()
+	// 设置多个节点地址
+	_ = storage.Set("client1", "192.168.1.1:8080")
+	_ = storage.Set("client2", "192.168.1.2:8080")
+
+	client := NewDistClient(storage, WithDistTimeout(100*time.Millisecond))
+	defer client.Close()
+
+	ctx := context.Background()
+	count, err := client.Broadcast(ctx, []byte("test message"))
+
+	// 由于没有实际的 gRPC 服务器，应该会失败
+	if err != nil {
+		t.Logf("Broadcast error (expected): %v", err)
+	}
+	t.Logf("Broadcast count: %d", count)
+}
+
+// TestClientWriterBatchWriteError 测试 writer 批量写入错误
+func TestClientWriterBatchWriteError(t *testing.T) {
+	hub := NewHubRun()
+	defer hub.Close()
+
+	errorCalled := make(chan error, 1)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := hub.Upgrader().Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+
+		client := NewClient(hub, WithID("batch-error-test"), WithBufSize(10))
+		client.conn = conn
+		client.OnError(func(id string, err error) {
+			errorCalled <- err
+		})
+
+		// 填满 send channel
+		for i := 0; i < 10; i++ {
+			client.Emit([]byte("filler"))
+		}
+
+		// 关闭底层连接以触发写入错误
+		conn.Close()
+
+		// 启动 writer
+		go client.writer()
+
+		time.Sleep(100 * time.Millisecond)
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	wsConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("Dial failed: %v", err)
+	}
+	defer wsConn.Close()
+
+	select {
+	case err := <-errorCalled:
+		t.Logf("Error callback received: %v", err)
+	case <-time.After(300 * time.Millisecond):
+		t.Log("No error callback (acceptable)")
+	}
+}
+
+// TestHubSafeCloseChannelPanic 测试 safeCloseChannel panic 恢复
+func TestHubSafeCloseChannelPanic(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	time.Sleep(10 * time.Millisecond)
+
+	// 关闭 Hub
+	hub.Close()
+	time.Sleep(10 * time.Millisecond)
+
+	// 再次关闭（测试 safeCloseChannel）
+	// 不应该 panic
+	hub.Close()
+}
+
+// TestIPMultipleCalls 测试 IP 多次调用
+func TestIPMultipleCalls(t *testing.T) {
+	ip1 := IP()
+	ip2 := IP()
+
+	// 应该返回相同的值（sync.Once）
+	if ip1 == nil && ip2 == nil {
+		t.Log("IP returned nil (no non-loopback interface)")
+	} else if ip1 != nil && ip2 != nil {
+		if !ip1.Equal(ip2) {
+			t.Errorf("IP() returned different values: %v vs %v", ip1, ip2)
+		}
+	}
 }

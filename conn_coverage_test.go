@@ -33,7 +33,6 @@ func TestClientConnMethodError(t *testing.T) {
 	t.Logf("Expected error: %v", err)
 }
 
-
 // TestSessionConnMethodError 测试 Session.Conn 方法的错误处理
 func TestSessionConnMethodError(t *testing.T) {
 	hub := NewHub() // 不启动 Run
