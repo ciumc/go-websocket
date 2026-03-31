@@ -9,12 +9,14 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
 
+// 常量保留用于向后兼容，但实际使用 Config 中的值
 const (
 	// writeWait 是向对等方写入消息的时间限制。
 	writeWait = 10 * time.Second
@@ -40,9 +42,7 @@ var (
 	space = []byte{' '}
 )
 
-// upgrader 用于将 HTTP 连接升级为 WebSocket 连接。
-// 它设置缓冲区大小并允许所有来源的 CORS。
-// 注意：可以使用 WithCheckOrigin 选项自定义跨域检查逻辑。
+// upgrader 保留用于向后兼容，但新代码应使用 Hub.Upgrader()
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
@@ -51,6 +51,7 @@ var upgrader = websocket.Upgrader{
 
 // Client 表示一个 WebSocket 客户端连接。
 // 它管理连接生命周期、消息发送/接收和事件回调。
+// Client 的方法可以安全地用于并发调用。
 type Client struct {
 	// hub 管理所有活跃客户端并广播消息
 	hub *Hub
@@ -67,17 +68,44 @@ type Client struct {
 	// closeOnce 确保 send channel 只关闭一次
 	closeOnce sync.Once
 
+	// closed 标识客户端是否已关闭（用于 Emit 安全检查）
+	closed atomic.Bool
+
 	// 用于处理连接事件的事件回调
 	onEvent      func(conn *Client, messageType int, message []byte)
 	onConnect    func(conn *Client)
 	onError      func(id string, err error)
 	onDisconnect func(id string)
+
+	// config 是配置覆盖（可选，用于 Session）
+	config *Config
+}
+
+// effectiveConfig 获取有效配置。
+// 如果 Client 有配置覆盖，使用覆盖的配置；
+// 否则使用 Hub 的配置。
+func (c *Client) effectiveConfig() Config {
+	if c.config != nil {
+		return *c.config
+	}
+	return c.hub.Config()
 }
 
 // Emit 向客户端发送消息。
 // 如果客户端已关闭或发送缓冲区已满，则返回 false。
-// 此方法可安全地用于并发使用。
+// 此方法可安全地用于并发使用，即使 channel 被并发关闭也不会 panic。
 func (c *Client) Emit(message []byte) bool {
+	// 先检查是否已关闭，快速路径
+	if c.closed.Load() {
+		return false
+	}
+	// 使用 defer recover 来处理可能的竞态条件
+	// 即使在检查后 channel 被并发关闭，也不会 panic
+	defer func() {
+		if r := recover(); r != nil {
+			// channel 已被关闭，忽略 panic
+		}
+	}()
 	select {
 	case c.send <- message:
 		return true
@@ -88,8 +116,10 @@ func (c *Client) Emit(message []byte) bool {
 }
 
 // closeSend 安全地关闭 send channel，使用 sync.Once 防止重复关闭。
+// 设置 closed 标志以防止后续 Emit 调用向已关闭的 channel 发送。
 func (c *Client) closeSend() {
 	c.closeOnce.Do(func() {
+		c.closed.Store(true)
 		close(c.send)
 	})
 }
@@ -117,18 +147,20 @@ func (c *Client) reader() {
 		}
 	}()
 
+	cfg := c.effectiveConfig()
+
 	// 设置消息大小限制
-	c.conn.SetReadLimit(maxMessageSize)
+	c.conn.SetReadLimit(cfg.MaxMessageSize)
 
 	// 设置初始读取超时
-	if err := c.conn.SetReadDeadline(time.Now().Add(pongWait)); err != nil {
+	if err := c.conn.SetReadDeadline(time.Now().Add(cfg.PongWait)); err != nil {
 		c.error(err)
 		return
 	}
 
 	// 设置 pong 处理器
 	c.conn.SetPongHandler(func(string) error {
-		return c.conn.SetReadDeadline(time.Now().Add(pongWait))
+		return c.conn.SetReadDeadline(time.Now().Add(cfg.PongWait))
 	})
 
 	for {
@@ -140,7 +172,8 @@ func (c *Client) reader() {
 			return
 		}
 		if c.onEvent != nil {
-			message = bytes.TrimSpace(bytes.Replace(message, newline, space, -1))
+			// 规范化消息：将换行符替换为空格并去除首尾空白
+			message = bytes.TrimSpace(bytes.ReplaceAll(message, newline, space))
 			c.onEvent(c, messageType, message)
 		}
 	}
@@ -150,7 +183,8 @@ func (c *Client) reader() {
 // 它从 send channel 发送消息并定期 ping 客户端。
 // 它确保在 writer 停止时进行适当的清理。
 func (c *Client) writer() {
-	ticker := time.NewTicker(pingPeriod)
+	cfg := c.effectiveConfig()
+	ticker := time.NewTicker(cfg.PingPeriod)
 	defer func() {
 		ticker.Stop()
 		if c.onDisconnect != nil {
@@ -227,7 +261,7 @@ func (c *Client) writer() {
 
 // setWriteDeadline 设置写入截止时间。
 func (c *Client) setWriteDeadline() error {
-	return c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+	return c.conn.SetWriteDeadline(time.Now().Add(c.effectiveConfig().WriteWait))
 }
 
 // Option 是一个配置 Client 的函数。
@@ -256,9 +290,14 @@ func WithBufSize(size int) Option {
 
 // WithCheckOrigin 设置 WebSocket upgrader 的 CheckOrigin 函数。
 // 用于自定义跨域检查逻辑。默认允许所有来源（return true）。
+//
+// Deprecated: 请使用 Hub 的 WithHubCheckOrigin 选项。
+// 此函数修改全局 upgrader 变量，可能导致并发测试中的竞态条件。
+// 迁移方式：使用 NewHubWithConfig(WithHubCheckOrigin(fn)) 替代。
 func WithCheckOrigin(fn func(r *http.Request) bool) Option {
 	return func(c *Client) {
 		// 修改全局 upgrader 的 CheckOrigin
+		// 注意：此操作有线程安全问题，仅保留用于向后兼容
 		upgrader.CheckOrigin = fn
 	}
 }
@@ -267,9 +306,10 @@ func WithCheckOrigin(fn func(r *http.Request) bool) Option {
 // 如果未通过选项提供 ID，将生成 UUID。
 // 客户端在调用 Conn() 之前不会连接。
 func NewClient(hub *Hub, opts ...Option) *Client {
+	cfg := hub.Config()
 	cli := &Client{
 		hub:  hub,
-		send: make(chan []byte, bufSize),
+		send: make(chan []byte, cfg.BufSize),
 	}
 
 	for _, opt := range opts {
@@ -296,8 +336,8 @@ func NewClient(hub *Hub, opts ...Option) *Client {
 //
 // 如果连接升级失败则返回错误。
 func (c *Client) Conn(w http.ResponseWriter, r *http.Request) error {
-	// 将 HTTP 连接升级为 WebSocket
-	conn, err := upgrader.Upgrade(w, r, nil)
+	// 将 HTTP 连接升级为 WebSocket（使用 Hub 的 upgrader）
+	conn, err := c.hub.Upgrader().Upgrade(w, r, nil)
 	if err != nil {
 		return err
 	}

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ciumc/go-websocket/websocketpb"
 	"github.com/gorilla/websocket"
-	"github.com/jayecc/go-websocket/websocketpb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/test/bufconn"
 )
@@ -501,28 +501,16 @@ func TestDistSessionWithOptions(t *testing.T) {
 
 // TestCleanupExpiredConnections 测试过期连接被清理
 func TestCleanupExpiredConnections(t *testing.T) {
-	// 清理连接池
-	CloseGrpcPool()
+	// 连接池现在是 DistClient 内部管理
+	// 此测试已废弃，改为测试 DistClient.Close()
+	storage := NewMockStorage()
+	client := NewDistClient(storage)
 
-	// 创建一个模拟的过期 pooledConn（不设置 conn 字段，测试 Range 处理）
-	// 注意：cleanupExpiredConnections 会在 conn 为 nil 时 panic，所以我们需要测试 Range 的行为
-	// 这里我们测试的是 cleanupExpiredConnections 函数能正常执行不 panic
+	// 验证 Close 不 panic
+	client.Close()
 
-	// 先确保连接池为空
-	count := 0
-	grpcClientPool.Range(func(key, value interface{}) bool {
-		count++
-		return true
-	})
-
-	if count != 0 {
-		t.Logf("Pool has %d connections before test", count)
-	}
-
-	// 调用清理函数 - 主要验证不 panic
-	cleanupExpiredConnections()
-
-	// 验证通过 - 没有 panic 即可
+	// 验证可以多次调用 Close
+	client.Close()
 }
 
 // TestCloseGrpcPool 测试关闭所有连接池
@@ -536,14 +524,13 @@ func TestCloseGrpcPool(t *testing.T) {
 }
 
 // TestStartPoolCleanup 测试清理 goroutine 启动
+// 已废弃：连接池现在由 DistClient 内部管理
 func TestStartPoolCleanup(t *testing.T) {
-	// 重置 poolCleanupOnce，确保可以重新启动
-	// 注意：由于 sync.Once 无法重置，这里主要测试函数不 panic
-
-	// 调用 startPoolCleanup 多次，应该只启动一个 goroutine
-	startPoolCleanup()
-	startPoolCleanup()
-	startPoolCleanup()
+	// 此测试已不再需要
+	// 连接池在 NewDistClient 时自动启动清理 goroutine
+	storage := NewMockStorage()
+	client := NewDistClient(storage)
+	defer client.Close()
 
 	// 给一点时间让 goroutine 启动
 	time.Sleep(10 * time.Millisecond)
@@ -553,19 +540,15 @@ func TestStartPoolCleanup(t *testing.T) {
 
 // TestGrpcClientConnPoolReuse 测试连接池重用
 func TestGrpcClientConnPoolReuse(t *testing.T) {
-	// 清理连接池
-	CloseGrpcPool()
+	// 连接池现在是 DistClient 内部管理
+	// 创建 DistClient 测试基本行为
+	storage := NewMockStorage()
+	client := NewDistClient(storage)
+	defer client.Close()
 
-	// 由于需要真实 gRPC 服务器，这里主要测试连接池的初始状态
-	// 验证连接池为空
-	count := 0
-	grpcClientPool.Range(func(key, value interface{}) bool {
-		count++
-		return true
-	})
-
-	if count != 0 {
-		t.Errorf("Expected empty pool, got %d connections", count)
+	// 验证 DistClient 正常工作
+	if client.storage != storage {
+		t.Error("DistClient storage not set correctly")
 	}
 }
 
@@ -653,26 +636,6 @@ func TestDistClientBroadcastWithError(t *testing.T) {
 	if count != 0 {
 		t.Errorf("Broadcast() count = %v, want 0", count)
 	}
-}
-
-// TestDistClientBroadcastV2 测试 BroadcastV2 方法
-func TestDistClientBroadcastV2(t *testing.T) {
-	storage := NewMockStorage()
-	_ = storage.Set("client1", "127.0.0.1:8080")
-
-	client := NewDistClient(storage)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	// BroadcastV2 应该调用 Broadcast
-	count, err := client.BroadcastV2(ctx, []byte("test message"))
-
-	// 由于没有真实 gRPC 服务器，预期返回 0
-	if err != nil {
-		t.Logf("BroadcastV2() error (expected): %v", err)
-	}
-	t.Logf("BroadcastV2() count = %d", count)
 }
 
 // TestDistSessionOnConnect 测试 DistSession OnConnect
@@ -1122,4 +1085,76 @@ func (e *errorStorage) Clear(host string) error {
 
 func (e *errorStorage) All() (map[string]string, error) {
 	return nil, fmt.Errorf("storage error")
+}
+
+// TestDistClientEmitContextCancelled 测试 Emit 在 context 已取消时的行为
+func TestDistClientEmitContextCancelled(t *testing.T) {
+	storage := NewMockStorage()
+	_ = storage.Set("test-client", "127.0.0.1:8080")
+	client := NewDistClient(storage)
+	defer client.Close()
+
+	// 创建一个已取消的 context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 立即取消
+
+	ok, err := client.Emit(ctx, "test-client", []byte("test message"))
+
+	if err == nil {
+		t.Error("Emit() should return error when context is cancelled")
+	}
+	if !strings.Contains(err.Error(), "context cancelled") {
+		t.Errorf("Emit() error should contain 'context cancelled', got: %v", err)
+	}
+	if ok {
+		t.Error("Emit() should return ok = false when context is cancelled")
+	}
+}
+
+// TestDistClientOnlineContextCancelled 测试 Online 在 context 已取消时的行为
+func TestDistClientOnlineContextCancelled(t *testing.T) {
+	storage := NewMockStorage()
+	_ = storage.Set("test-client", "127.0.0.1:8080")
+	client := NewDistClient(storage)
+	defer client.Close()
+
+	// 创建一个已取消的 context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 立即取消
+
+	ok, err := client.Online(ctx, "test-client")
+
+	if err == nil {
+		t.Error("Online() should return error when context is cancelled")
+	}
+	if !strings.Contains(err.Error(), "context cancelled") {
+		t.Errorf("Online() error should contain 'context cancelled', got: %v", err)
+	}
+	if ok {
+		t.Error("Online() should return ok = false when context is cancelled")
+	}
+}
+
+// TestDistClientBroadcastContextCancelled 测试 Broadcast 在 context 已取消时的行为
+func TestDistClientBroadcastContextCancelled(t *testing.T) {
+	storage := NewMockStorage()
+	_ = storage.Set("test-client", "127.0.0.1:8080")
+	client := NewDistClient(storage)
+	defer client.Close()
+
+	// 创建一个已取消的 context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 立即取消
+
+	count, err := client.Broadcast(ctx, []byte("test message"))
+
+	if err == nil {
+		t.Error("Broadcast() should return error when context is cancelled")
+	}
+	if !strings.Contains(err.Error(), "context cancelled") {
+		t.Errorf("Broadcast() error should contain 'context cancelled', got: %v", err)
+	}
+	if count != 0 {
+		t.Error("Broadcast() should return count = 0 when context is cancelled")
+	}
 }

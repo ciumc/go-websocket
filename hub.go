@@ -3,12 +3,21 @@ package websocket
 import (
 	"log"
 	"sync"
+	"sync/atomic"
+
+	"github.com/gorilla/websocket"
 )
 
 // Hub 维护活跃客户端集合并向客户端广播消息。
 // 它作为 WebSocket 服务器的中央消息代理。
 // 它可以安全地用于多个 goroutine 的并发访问。
 type Hub struct {
+	// config 是 Hub 的配置
+	config Config
+
+	// upgrader 是 WebSocket 升级器（不再是全局变量）
+	upgrader websocket.Upgrader
+
 	// clientsLock 保护 clients map 免受并发访问
 	clientsLock sync.RWMutex
 
@@ -29,15 +38,42 @@ type Hub struct {
 
 	// closeOnce 确保 done channel 只关闭一次
 	closeOnce sync.Once
+
+	// closed 标志 Hub 是否已关闭（用于 Broadcast 安全检查）
+	closed atomic.Bool
 }
 
 // NewHub 创建一个新的 Hub 实例，初始化所有 channel 和 map。
 // Hub 在调用 Run() 之前不会启动。
+// 使用 DefaultConfig 作为默认配置。
 func NewHub() *Hub {
+	return NewHubWithConfig()
+}
+
+// NewHubWithConfig 使用配置选项创建一个新的 Hub 实例。
+// 如果没有提供选项，使用 DefaultConfig。
+func NewHubWithConfig(opts ...HubOption) *Hub {
+	config := DefaultConfig()
+	for _, opt := range opts {
+		opt(&config)
+	}
+
+	// 使用 config.BufSize 作为 channel 缓冲区大小
+	bufSize := config.BufSize
+	if bufSize <= 0 {
+		bufSize = 256 // 默认缓冲区大小
+	}
+
 	h := &Hub{
-		broadcast:   make(chan []byte, 100),
-		register:    make(chan *Client, 100),
-		unregister:  make(chan *Client, 100),
+		config: config,
+		upgrader: websocket.Upgrader{
+			ReadBufferSize:  1024,
+			WriteBufferSize: 1024,
+			CheckOrigin:     config.CheckOrigin,
+		},
+		broadcast:   make(chan []byte, bufSize),
+		register:    make(chan *Client, bufSize),
+		unregister:  make(chan *Client, bufSize),
 		clients:     make(map[string]*Client),
 		clientsLock: sync.RWMutex{},
 		done:        make(chan struct{}),
@@ -49,9 +85,24 @@ func NewHub() *Hub {
 // NewHubRun 创建一个新的 Hub 并在单独的 goroutine 中启动它。
 // 这是一个便利函数，结合了 NewHub() 和 Run()。
 func NewHubRun() *Hub {
-	h := NewHub()
+	return NewHubRunWithConfig()
+}
+
+// NewHubRunWithConfig 使用配置选项创建一个新的 Hub 并启动它。
+func NewHubRunWithConfig(opts ...HubOption) *Hub {
+	h := NewHubWithConfig(opts...)
 	go h.Run()
 	return h
+}
+
+// Config 返回 Hub 的配置副本。
+func (h *Hub) Config() Config {
+	return h.config
+}
+
+// Upgrader 返回 Hub 的 WebSocket 升级器。
+func (h *Hub) Upgrader() *websocket.Upgrader {
+	return &h.upgrader
 }
 
 // Client 根据 ID 获取客户端。
@@ -69,6 +120,7 @@ func (h *Hub) Client(id string) (*Client, bool) {
 // 使用 sync.Once 确保 channel 只关闭一次，避免重复关闭 panic。
 func (h *Hub) Close() {
 	h.closeOnce.Do(func() {
+		h.closed.Store(true)
 		close(h.done)
 	})
 }
@@ -76,7 +128,11 @@ func (h *Hub) Close() {
 // Broadcast 向所有已连接的客户端发送消息。
 // 消息被排队等待异步发送。
 // 此方法立即返回，即使客户端无法接收消息。
+// 如果 Hub 已关闭，消息会被丢弃。
 func (h *Hub) Broadcast(message []byte) {
+	if h.closed.Load() {
+		return
+	}
 	select {
 	case h.broadcast <- message:
 	case <-h.done:
@@ -107,16 +163,29 @@ func (h *Hub) Run() {
 		h.clientsLock.Unlock()
 
 		// 安全地关闭所有 channel（使用 recover 防止重复关闭 panic）
+		// 注意：重复关闭不应发生，如果发生则记录日志以便诊断
 		func() {
-			defer func() { recover() }()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("hub: broadcast channel double-close detected (should not happen): %v", r)
+				}
+			}()
 			close(h.broadcast)
 		}()
 		func() {
-			defer func() { recover() }()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("hub: register channel double-close detected (should not happen): %v", r)
+				}
+			}()
 			close(h.register)
 		}()
 		func() {
-			defer func() { recover() }()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("hub: unregister channel double-close detected (should not happen): %v", r)
+				}
+			}()
 			close(h.unregister)
 		}()
 	}()

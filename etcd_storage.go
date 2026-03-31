@@ -1,6 +1,7 @@
 package websocket
 
 import (
+	"fmt"
 	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -58,7 +59,10 @@ func (s *EtcdStorage) Set(key string, value string) error {
 	ctx, cancel := contextTimeout()
 	defer cancel()
 	_, err := s.client.Put(ctx, s.prefix+key, value)
-	return err
+	if err != nil {
+		return fmt.Errorf("etcd put key %s: %w", s.prefix+key, err)
+	}
+	return nil
 }
 
 // Get 获取指定键对应的值。
@@ -70,10 +74,10 @@ func (s *EtcdStorage) Set(key string, value string) error {
 //   - error: 操作过程中发生的错误（如果有）
 func (s *EtcdStorage) Get(key string) (string, error) {
 	ctx, cancel := contextTimeout()
+	defer cancel() // 确保 cancel 总是被调用，避免资源泄漏
 	resp, err := s.client.Get(ctx, s.prefix+key)
-	cancel()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("etcd get key %s: %w", s.prefix+key, err)
 	}
 	if len(resp.Kvs) == 0 {
 		return "", nil // key 不存在返回空字符串
@@ -87,13 +91,16 @@ func (s *EtcdStorage) Get(key string) (string, error) {
 //
 // 返回值:
 //   - error: 操作过程中发生的错误（如果有）
+//
+// 注意: 此方法逐个删除键，如果中途出错，已删除的键无法恢复。
+// 对于需要原子性删除的场景，请使用 etcd 的事务 API。
 func (s *EtcdStorage) Del(keys ...string) error {
 	ctx, cancel := contextTimeout()
 	defer cancel()
 	for _, key := range keys {
 		_, err := s.client.Delete(ctx, s.prefix+key)
 		if err != nil {
-			return err
+			return fmt.Errorf("etcd delete key %s: %w", s.prefix+key, err)
 		}
 	}
 	return nil
@@ -121,7 +128,7 @@ func (s *EtcdStorage) delKeys(keys []string) error {
 	defer cancel()
 	for _, key := range keys {
 		if _, err := s.client.Delete(ctx, s.prefix+key); err != nil {
-			return err
+			return fmt.Errorf("etcd delete key %s: %w", s.prefix+key, err)
 		}
 	}
 	return nil
@@ -134,10 +141,10 @@ func (s *EtcdStorage) delKeys(keys []string) error {
 func (s *EtcdStorage) All() (map[string]string, error) {
 	result := make(map[string]string)
 	ctx, cancel := contextTimeout()
+	defer cancel() // 确保 cancel 总是被调用，避免资源泄漏
 	resp, err := s.client.Get(ctx, s.prefix, clientv3.WithPrefix())
-	cancel()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("etcd get all with prefix %s: %w", s.prefix, err)
 	}
 	// 遍历响应中的键值对并填充到结果中
 	for _, kv := range resp.Kvs {

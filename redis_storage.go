@@ -77,8 +77,8 @@ func (s *RedisStorage) Set(key string, value string) error {
 //   - error: 操作过程中发生的错误（如果有）
 func (s *RedisStorage) Get(key string) (string, error) {
 	ctx, cancel := contextTimeout()
+	defer cancel() // 确保 cancel 总是被调用，避免资源泄漏
 	value, err := s.client.HGet(ctx, s.prefix, key).Result()
-	cancel()
 	if errors.Is(err, redis.Nil) {
 		return "", nil
 	}

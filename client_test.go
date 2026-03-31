@@ -1060,6 +1060,41 @@ func TestClientOnErrorCallback(t *testing.T) {
 	}
 }
 
+// TestClientEmitAfterClose 测试关闭后 Emit 应该返回 false 而不是 panic
+func TestClientEmitAfterClose(t *testing.T) {
+	hub := NewHub()
+	client := NewClient(hub, WithID("emit-after-close-test"))
 
+	// 关闭 send channel
+	client.closeSend()
 
+	// Emit 应该返回 false 而不是 panic
+	// 使用 recover 来捕获任何 panic
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("Emit should not panic after close, got: %v", r)
+		}
+	}()
 
+	result := client.Emit([]byte("test message"))
+	if result {
+		t.Error("Emit should return false after close")
+	}
+}
+
+// TestClientEmitClosedChannelMultiple 测试多次调用 Emit 后关闭
+func TestClientEmitClosedChannelMultiple(t *testing.T) {
+	hub := NewHub()
+	client := NewClient(hub, WithID("closed-channel-test"))
+
+	// 先关闭 channel
+	client.closeSend()
+
+	// 多次调用 Emit，确保不会 panic
+	for i := 0; i < 10; i++ {
+		result := client.Emit([]byte("test"))
+		if result {
+			t.Errorf("Emit should return false after close (iteration %d)", i)
+		}
+	}
+}
