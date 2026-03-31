@@ -275,38 +275,6 @@ func TestGrpcPoolCleanExpiredWithConnections(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 }
 
-// TestCloseGrpcPoolWithItems 测试 CloseGrpcPool 有项目时
-func TestCloseGrpcPoolWithItems(t *testing.T) {
-	// 清空池
-	CloseGrpcPool()
-
-	// 添加 mock 连接到全局池
-	grpcClientPool.Store("test-pool-addr-1", &pooledConn{
-		conn:     nil,
-		lastUsed: time.Now().UnixNano(),
-	})
-	grpcClientPool.Store("test-pool-addr-2", &pooledConn{
-		conn:     nil,
-		lastUsed: time.Now().UnixNano(),
-	})
-
-	// 调用 CloseGrpcPool
-	CloseGrpcPool()
-
-	// 验证池已清空
-	count := 0
-	grpcClientPool.Range(func(key, value interface{}) bool {
-		count++
-		return true
-	})
-
-	if count != 0 {
-		t.Errorf("Pool should be empty, got %d items", count)
-	}
-
-	// 再次调用（测试空池情况）
-	CloseGrpcPool()
-}
 
 // TestEtcdStorageWithMock 测试 Etcd 存储接口（使用 mock）
 func TestEtcdStorageWithMock(t *testing.T) {

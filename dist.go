@@ -63,6 +63,7 @@ func (s *DistServer) Broadcast(_ context.Context, request *websocketpb.Broadcast
 }
 
 // grpcPool 连接池（DistClient 内部使用）
+// 管理 gRPC 连接的生命周期，包括创建、缓存、过期清理和关闭。
 type grpcPool struct {
 	mu      sync.RWMutex
 	conns   map[string]*pooledConn
@@ -70,9 +71,11 @@ type grpcPool struct {
 	done    chan struct{}
 }
 
+// pooledConn 表示池中的单个连接条目。
+// 包含 gRPC 连接和最后使用时间戳（用于过期清理）。
 type pooledConn struct {
 	conn     *grpc.ClientConn
-	lastUsed int64
+	lastUsed int64 // 最后使用时间（UnixNano 格式）
 }
 
 // newGrpcPool 创建连接池并启动清理 goroutine
@@ -100,6 +103,8 @@ func (p *grpcPool) runCleanup() {
 	}
 }
 
+// cleanExpired 清理超过 TTL 的过期连接。
+// 在加锁状态下遍历连接池，关闭并删除过期连接。
 func (p *grpcPool) cleanExpired() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -117,6 +122,9 @@ func (p *grpcPool) cleanExpired() {
 	}
 }
 
+// get 从连接池获取指定地址的 gRPC 连接。
+// 如果连接存在且状态健康，更新使用时间并返回；
+// 如果连接不存在或状态异常，创建新连接并加入池中。
 func (p *grpcPool) get(addr string) (*grpc.ClientConn, error) {
 	p.mu.RLock()
 	pc, ok := p.conns[addr]
@@ -155,10 +163,10 @@ func (p *grpcPool) get(addr string) (*grpc.ClientConn, error) {
 func (p *grpcPool) close() {
 	select {
 	case <-p.done:
-		// 已经关闭
+		// 已经关闭，直接返回避免重复关闭 channel 导致 panic
 		return
 	default:
-		close(p.done)
+		close(p.done) // 发送关闭信号给 runCleanup goroutine
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -317,53 +325,4 @@ type DistClientOption func(dc *DistClient)
 // WithDistTimeout 设置 gRPC 调用超时。
 func WithDistTimeout(timeout time.Duration) DistClientOption {
 	return func(dc *DistClient) { dc.timeout = timeout }
-}
-
-// ===== 向后兼容 =====
-
-// DistSession 已废弃，请使用 Session。
-// Deprecated: 使用 NewSession(hub, WithStorage(storage), WithAddr(addr)) 代替。
-type DistSession = Session
-
-// NewDistSession 已废弃，请使用 NewSession。
-// Deprecated: 使用 NewSession(hub, WithStorage(storage), WithAddr(addr), opts...) 代替。
-func NewDistSession(hub *Hub, storage Storage, addr string, opts ...Option) *Session {
-	// 转换 Option 为 SessionOption
-	sessionOpts := make([]SessionOption, 0, len(opts)+2)
-	sessionOpts = append(sessionOpts, WithStorage(storage), WithAddr(addr))
-
-	// 创建临时 client 来提取选项
-	client := &Client{hub: hub}
-	for _, opt := range opts {
-		opt(client)
-	}
-	if client.id != "" {
-		sessionOpts = append(sessionOpts, WithSessionID(client.id))
-	}
-
-	return NewSession(hub, sessionOpts...)
-}
-
-// 全局变量（向后兼容，标记为废弃）
-
-// grpcClientPool 全局连接池。
-// Deprecated: 连接池现在由 DistClient 内部管理。
-var grpcClientPool sync.Map
-
-// CloseGrpcPool 关闭全局连接池。
-// Deprecated: 请使用 DistClient.Close() 代替。
-func CloseGrpcPool() {
-	grpcClientPool.Range(func(key, value interface{}) bool {
-		grpcClientPool.Delete(key)
-		if pc, ok := value.(*pooledConn); ok {
-			if pc.conn != nil {
-				_ = pc.conn.Close()
-			}
-		} else if conn, ok := value.(*grpc.ClientConn); ok {
-			if conn != nil {
-				_ = conn.Close()
-			}
-		}
-		return true
-	})
 }

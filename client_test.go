@@ -11,6 +11,11 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// testUpgrader 是测试用的 WebSocket 升级器
+var testUpgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
 // TestNewClient 测试构造函数默认值（id 自动生成、send channel 创建）
 func TestNewClient(t *testing.T) {
 	hub := NewHub()
@@ -372,11 +377,8 @@ func TestClientConcurrentEmit(t *testing.T) {
 // TestClientCloseSafety 测试多次关闭不会 panic
 func TestClientCloseSafety(t *testing.T) {
 	// 创建测试服务器
-	upgrader := websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool { return true },
-	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
+		conn, err := testUpgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
@@ -436,11 +438,8 @@ func TestClientConn(t *testing.T) {
 	defer hub.Close()
 
 	// 创建测试服务器
-	upgrader := websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool { return true },
-	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
+		conn, err := testUpgrader.Upgrade(w, r, nil)
 		if err != nil {
 			t.Logf("Upgrade error: %v", err)
 			return
@@ -499,46 +498,11 @@ func TestClientBroadcast(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 }
 
-// TestClientWithCheckOrigin 测试 WithCheckOrigin 函数
-func TestClientWithCheckOrigin(t *testing.T) {
-	// 由于 upgrader 是全局变量，并发修改会导致竞态条件
-	// 这里我们只测试 WithCheckOrigin 函数返回的 Option 能正确设置回调
-	customCalled := false
-	customCheckOrigin := func(r *http.Request) bool {
-		customCalled = true
-		return true
-	}
-
-	// 创建一个测试用的 Client 来应用 Option
-	hub := NewHub()
-	client := NewClient(hub)
-
-	// 应用 Option（这会修改全局 upgrader）
-	opt := WithCheckOrigin(customCheckOrigin)
-	opt(client)
-
-	// 验证全局 upgrader 的 CheckOrigin 已被修改
-	// 创建一个测试请求来验证
-	req := httptest.NewRequest("GET", "http://example.com/ws", nil)
-	result := upgrader.CheckOrigin(req)
-
-	if !result {
-		t.Error("Custom CheckOrigin returned false")
-	}
-
-	if !customCalled {
-		t.Error("Custom CheckOrigin was not called")
-	}
-
-	// 恢复默认的 CheckOrigin
-	upgrader.CheckOrigin = func(r *http.Request) bool { return true }
-}
-
 // setupTestWebSocket 创建测试 WebSocket 服务器和客户端连接
 func setupTestWebSocket(t *testing.T, hub *Hub) (*Client, *websocket.Conn, *httptest.Server) {
 	// 创建测试服务器
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
+		conn, err := testUpgrader.Upgrade(w, r, nil)
 		if err != nil {
 			t.Logf("Upgrade error: %v", err)
 			return
@@ -628,7 +592,7 @@ func TestClientReaderClose(t *testing.T) {
 
 	// 创建测试服务器
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
+		conn, err := testUpgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
@@ -671,7 +635,7 @@ func TestClientWriterPing(t *testing.T) {
 	// 创建测试服务器，记录收到的 ping
 	pingReceived := make(chan bool, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
+		conn, err := testUpgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
@@ -726,7 +690,7 @@ func TestClientWriterCloseMessage(t *testing.T) {
 
 	closeReceived := make(chan bool, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
+		conn, err := testUpgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
@@ -783,7 +747,7 @@ func TestClientSetWriteDeadline(t *testing.T) {
 	defer hub.Close()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
+		conn, err := testUpgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
@@ -819,7 +783,7 @@ func TestClientConnMethod(t *testing.T) {
 	// 创建测试服务器
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 使用项目的 upgrader 升级连接
-		conn, err := upgrader.Upgrade(w, r, nil)
+		conn, err := testUpgrader.Upgrade(w, r, nil)
 		if err != nil {
 			t.Logf("Upgrade error: %v", err)
 			return
@@ -890,7 +854,7 @@ func TestClientOnDisconnectCallback(t *testing.T) {
 
 	// 创建测试服务器
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
+		conn, err := testUpgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
@@ -938,7 +902,7 @@ func TestClientOnDisconnectCallback(t *testing.T) {
 func TestClientWriterSendMultiple(t *testing.T) {
 	// 创建测试服务器
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
+		conn, err := testUpgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
@@ -986,7 +950,7 @@ func TestClientWriterSendMultiple(t *testing.T) {
 func TestClientWriterNextWriterError(t *testing.T) {
 	// 创建测试服务器，立即关闭连接
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
+		conn, err := testUpgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
@@ -1024,7 +988,7 @@ func TestClientOnErrorCallback(t *testing.T) {
 
 	// 创建测试服务器
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
+		conn, err := testUpgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
@@ -1116,7 +1080,7 @@ func TestClientWriterSetWriteDeadlineError(t *testing.T) {
 
 	// 创建已关闭的连接（模拟 setWriteDeadline 失败）
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
+		conn, err := testUpgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
@@ -1164,7 +1128,7 @@ func TestClientWriterNextWriterErrorCoverage(t *testing.T) {
 
 	// 创建测试服务器，升级后立即关闭
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
+		conn, err := testUpgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
@@ -1214,7 +1178,7 @@ func TestClientWriterWriteError(t *testing.T) {
 
 	// 创建测试服务器
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
+		conn, err := testUpgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
@@ -1256,7 +1220,7 @@ func TestClientWriterCloseError(t *testing.T) {
 
 	// 创建测试服务器
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
+		conn, err := testUpgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
@@ -1301,7 +1265,7 @@ func TestClientWriterPingError(t *testing.T) {
 
 	// 创建测试服务器，升级后关闭
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
+		conn, err := testUpgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}

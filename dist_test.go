@@ -17,54 +17,6 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 )
 
-// TestNewDistSession 测试 DistSession 构造函数
-func TestNewDistSession(t *testing.T) {
-	hub := NewHubRun()
-	defer hub.Close()
-
-	storage := NewMockStorage()
-	addr := "127.0.0.1:8080"
-
-	session := NewDistSession(hub, storage, addr)
-	if session == nil {
-		t.Fatal("NewDistSession() returned nil")
-	}
-
-	// 验证 client 正确设置
-	if session.client == nil {
-		t.Error("NewDistSession() client is nil")
-	}
-
-	// 验证 storage 正确设置
-	if session.storage != storage {
-		t.Error("NewDistSession() storage mismatch")
-	}
-
-	// 验证 addr 正确设置
-	if session.addr != addr {
-		t.Errorf("NewDistSession() addr = %v, want %v", session.addr, addr)
-	}
-}
-
-// TestDistSessionClient 测试 Client() 方法返回内部的 Client 实例
-func TestDistSessionClient(t *testing.T) {
-	hub := NewHubRun()
-	defer hub.Close()
-
-	storage := NewMockStorage()
-	session := NewDistSession(hub, storage, "127.0.0.1:8080")
-
-	client := session.Client()
-	if client == nil {
-		t.Fatal("Client() returned nil")
-	}
-
-	// 验证返回的是同一个 client 实例
-	if client != session.client {
-		t.Error("Client() returned different instance")
-	}
-}
-
 // TestNewDistClient 测试 DistClient 构造函数
 func TestNewDistClient(t *testing.T) {
 	storage := NewMockStorage()
@@ -397,18 +349,6 @@ func TestDistServerBroadcast(t *testing.T) {
 	}
 }
 
-// TestGrpcConnectionPool 测试 gRPC 连接池的基本行为
-func TestGrpcConnectionPool(t *testing.T) {
-	// 测试连接池初始状态
-	// 注意：由于需要真实 gRPC 服务器，这里主要测试构造逻辑
-
-	// 清理连接池
-	CloseGrpcPool()
-
-	// 验证 CloseGrpcPool 可以正常调用（不 panic）
-	CloseGrpcPool()
-}
-
 // TestDistClientWithTimeoutOption 测试超时选项
 func TestDistClientWithTimeoutOption(t *testing.T) {
 	tests := []struct {
@@ -482,25 +422,9 @@ func TestDistClientGetTimeout(t *testing.T) {
 	}
 }
 
-// TestDistSessionWithOptions 测试 DistSession 使用 Option
-func TestDistSessionWithOptions(t *testing.T) {
-	hub := NewHubRun()
-	defer hub.Close()
-
-	storage := NewMockStorage()
-	customID := "custom-client-id"
-
-	session := NewDistSession(hub, storage, "127.0.0.1:8080", WithID(customID))
-
-	if session.client.GetID() != customID {
-		t.Errorf("client ID = %v, want %v", session.client.GetID(), customID)
-	}
-}
-
-// TestCleanupExpiredConnections 测试过期连接被清理
+// TestCleanupExpiredConnections 测试 DistClient.Close 正确清理内部连接池
 func TestCleanupExpiredConnections(t *testing.T) {
-	// 连接池现在是 DistClient 内部管理
-	// 此测试已废弃，改为测试 DistClient.Close()
+	// 连接池现在由 DistClient 内部管理
 	storage := NewMockStorage()
 	client := NewDistClient(storage)
 
@@ -511,21 +435,9 @@ func TestCleanupExpiredConnections(t *testing.T) {
 	client.Close()
 }
 
-// TestCloseGrpcPool 测试关闭所有连接池
-func TestCloseGrpcPool(t *testing.T) {
-	// 先清理
-	CloseGrpcPool()
-
-	// 验证可以正常调用多次不 panic
-	CloseGrpcPool()
-	CloseGrpcPool()
-}
-
-// TestStartPoolCleanup 测试清理 goroutine 启动
-// 已废弃：连接池现在由 DistClient 内部管理
+// TestStartPoolCleanup 测试连接池清理 goroutine 自动启动
+// 连接池在 NewDistClient 时自动启动清理 goroutine
 func TestStartPoolCleanup(t *testing.T) {
-	// 此测试已不再需要
-	// 连接池在 NewDistClient 时自动启动清理 goroutine
 	storage := NewMockStorage()
 	client := NewDistClient(storage)
 	defer client.Close()
@@ -636,167 +548,6 @@ func TestDistClientBroadcastWithError(t *testing.T) {
 	}
 }
 
-// TestDistSessionOnConnect 测试 DistSession OnConnect
-func TestDistSessionOnConnect(t *testing.T) {
-	hub := NewHubRun()
-	defer hub.Close()
-
-	storage := NewMockStorage()
-	session := NewDistSession(hub, storage, "127.0.0.1:8080")
-
-	connectCalled := false
-	session.OnConnect(func(conn *Client) {
-		connectCalled = true
-	})
-
-	// 验证回调已设置
-	if session.client.onConnect == nil {
-		t.Error("OnConnect callback was not set")
-	}
-
-	// 手动触发回调进行测试
-	if session.client.onConnect != nil {
-		session.client.onConnect(session.client)
-	}
-
-	// 注意：由于 storage 操作在回调中，我们需要验证 storage 是否被更新
-	// 但由于 client 没有真实连接，这里主要验证回调机制
-	t.Logf("Connect callback called: %v", connectCalled)
-}
-
-// TestDistSessionOnDisconnect 测试 DistSession OnDisconnect
-func TestDistSessionOnDisconnect(t *testing.T) {
-	hub := NewHubRun()
-	defer hub.Close()
-
-	storage := NewMockStorage()
-	// 预先设置一个客户端
-	_ = storage.Set("test-client", "127.0.0.1:8080")
-
-	session := NewDistSession(hub, storage, "127.0.0.1:8080", WithID("test-client"))
-
-	disconnectCalled := false
-	session.OnDisconnect(func(id string) {
-		disconnectCalled = true
-	})
-
-	// 验证回调已设置
-	if session.client.onDisconnect == nil {
-		t.Error("OnDisconnect callback was not set")
-	}
-
-	// 手动触发回调进行测试
-	if session.client.onDisconnect != nil {
-		session.client.onDisconnect("test-client")
-	}
-
-	if !disconnectCalled {
-		t.Error("OnDisconnect callback was not called")
-	}
-}
-
-// TestDistSessionOnEvent 测试 DistSession OnEvent
-func TestDistSessionOnEvent(t *testing.T) {
-	hub := NewHubRun()
-	defer hub.Close()
-
-	storage := NewMockStorage()
-	session := NewDistSession(hub, storage, "127.0.0.1:8080")
-
-	eventCalled := false
-	session.OnEvent(func(conn *Client, messageType int, message []byte) {
-		eventCalled = true
-	})
-
-	// 验证回调已设置
-	if session.client.onEvent == nil {
-		t.Error("OnEvent callback was not set")
-	}
-
-	// 手动触发回调进行测试
-	if session.client.onEvent != nil {
-		session.client.onEvent(session.client, websocket.TextMessage, []byte("test"))
-	}
-
-	if !eventCalled {
-		t.Error("OnEvent callback was not called")
-	}
-}
-
-// TestDistSessionOnError 测试 DistSession OnError
-func TestDistSessionOnError(t *testing.T) {
-	hub := NewHubRun()
-	defer hub.Close()
-
-	storage := NewMockStorage()
-	session := NewDistSession(hub, storage, "127.0.0.1:8080")
-
-	errorCalled := false
-	session.OnError(func(id string, err error) {
-		errorCalled = true
-	})
-
-	// 验证回调已设置
-	if session.client.onError == nil {
-		t.Error("OnError callback was not set")
-	}
-
-	// 手动触发回调进行测试
-	if session.client.onError != nil {
-		session.client.onError("test-client", fmt.Errorf("test error"))
-	}
-
-	if !errorCalled {
-		t.Error("OnError callback was not called")
-	}
-}
-
-// TestDistSessionConn 测试 DistSession Conn 方法
-func TestDistSessionConn(t *testing.T) {
-	hub := NewHubRun()
-	defer hub.Close()
-
-	storage := NewMockStorage()
-	session := NewDistSession(hub, storage, "127.0.0.1:8080")
-
-	// 创建测试服务器
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		// 保持连接
-		for {
-			_, _, err := conn.ReadMessage()
-			if err != nil {
-				return
-			}
-		}
-	}))
-	defer server.Close()
-
-	// 创建 WebSocket 连接
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
-	wsConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
-	if err != nil {
-		t.Fatalf("Failed to dial: %v", err)
-	}
-	defer wsConn.Close()
-
-	// 手动设置连接
-	session.client.conn = wsConn
-	hub.register <- session.client
-
-	// 等待注册
-	time.Sleep(50 * time.Millisecond)
-
-	// 验证客户端已注册
-	if _, ok := hub.Client(session.client.GetID()); !ok {
-		t.Error("Session client was not registered")
-	}
-}
-
 // TestDistServerEmitWithClient 测试 DistServer Emit 方法（客户端存在）
 func TestDistServerEmitWithClient(t *testing.T) {
 	hub := NewHubRun()
@@ -804,7 +555,7 @@ func TestDistServerEmitWithClient(t *testing.T) {
 
 	// 创建测试服务器
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
+		conn, err := hub.Upgrader().Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}

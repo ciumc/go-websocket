@@ -33,35 +33,6 @@ func TestClientConnMethodError(t *testing.T) {
 	t.Logf("Expected error: %v", err)
 }
 
-// TestCloseGrpcPoolFunction 测试 CloseGrpcPool 函数
-func TestCloseGrpcPoolFunction(t *testing.T) {
-	// 第一次调用 - 应该什么都不做（pool 为 nil）
-	CloseGrpcPool()
-
-	// 第二次调用 - 应该什么都不做
-	CloseGrpcPool()
-
-	// 第三次调用 - 应该什么都不做
-	CloseGrpcPool()
-}
-
-// TestCloseGrpcPoolWithDistClient 测试 CloseGrpcPool 与 DistClient 的交互
-func TestCloseGrpcPoolWithDistClient(t *testing.T) {
-	storage := NewMockStorage()
-	_ = storage.Set("test-client", "localhost:8080")
-
-	client := NewDistClient(storage)
-	defer client.Close()
-
-	// CloseGrpcPool 不应该影响 DistClient 的内部 pool
-	CloseGrpcPool()
-
-	// 验证 DistClient 仍然工作
-	_, err := client.storage.Get("test-client")
-	if err != nil {
-		t.Errorf("DistClient storage should still work: %v", err)
-	}
-}
 
 // TestSessionConnMethodError 测试 Session.Conn 方法的错误处理
 func TestSessionConnMethodError(t *testing.T) {

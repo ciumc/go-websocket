@@ -95,12 +95,6 @@ func TestDistClientBroadcastWithMultipleAddresses(t *testing.T) {
 	t.Logf("Broadcast count: %d", count)
 }
 
-// TestCloseGrpcPoolWithConnections 测试 CloseGrpcPool 清理
-func TestCloseGrpcPoolWithConnections(t *testing.T) {
-	// 调用全局 CloseGrpcPool
-	CloseGrpcPool()
-	CloseGrpcPool() // 多次调用不应 panic
-}
 
 // TestDistServerWithMockHub 测试 DistServer 方法
 func TestDistServerWithMockHub(t *testing.T) {

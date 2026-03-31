@@ -24,14 +24,6 @@ var (
 	space = []byte{' '}
 )
 
-// upgrader 保留用于向后兼容，但新代码应使用 Hub.Upgrader()
-// Deprecated: 此全局变量将在未来版本中移除，请使用 Hub 的 Upgrader() 方法。
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin:     func(r *http.Request) bool { return true },
-}
-
 // Client 表示一个 WebSocket 客户端连接。
 // 它管理连接生命周期、消息发送/接收和事件回调。
 // Client 的方法可以安全地用于并发调用。
@@ -125,6 +117,7 @@ func (c *Client) GetID() string {
 // reader 循环从 WebSocket 连接读取消息。
 // 它处理 pong 消息并处理传入的消息。
 // 如果发生任何错误，它会从 hub 注销客户端。
+// reader 在独立的 goroutine 中运行，退出时触发客户端注销。
 func (c *Client) reader() {
 	defer func() {
 		c.hub.unregister <- c
@@ -168,6 +161,7 @@ func (c *Client) reader() {
 // writer 处理向 WebSocket 连接写入消息。
 // 它从 send channel 发送消息并定期 ping 客户端。
 // 它确保在 writer 停止时进行适当的清理。
+// writer 在独立的 goroutine 中运行，退出时触发 OnDisconnect 回调。
 func (c *Client) writer() {
 	cfg := c.effectiveConfig()
 	ticker := time.NewTicker(cfg.PingPeriod)
@@ -252,6 +246,7 @@ func (c *Client) setWriteDeadline() error {
 
 // Option 是一个配置 Client 的函数。
 // 它遵循函数式选项模式以实现灵活的客户端配置。
+// 使用示例：NewClient(hub, WithID("my-id"), WithBufSize(256))
 type Option func(c *Client)
 
 // WithID 设置客户端 ID。
@@ -270,20 +265,6 @@ func WithBufSize(size int) Option {
 		if size > 0 {
 			c.bufSize = size
 		}
-	}
-}
-
-// WithCheckOrigin 设置 WebSocket upgrader 的 CheckOrigin 函数。
-// 用于自定义跨域检查逻辑。默认允许所有来源（return true）。
-//
-// Deprecated: 请使用 Hub 的 WithHubCheckOrigin 选项。
-// 此函数修改全局 upgrader 变量，可能导致并发测试中的竞态条件。
-// 迁移方式：使用 NewHubWithConfig(WithHubCheckOrigin(fn)) 替代。
-func WithCheckOrigin(fn func(r *http.Request) bool) Option {
-	return func(c *Client) {
-		// 修改全局 upgrader 的 CheckOrigin
-		// 注意：此操作有线程安全问题，仅保留用于向后兼容
-		upgrader.CheckOrigin = fn
 	}
 }
 

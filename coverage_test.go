@@ -145,26 +145,3 @@ func TestSessionWithAllOptions(t *testing.T) {
 	}
 }
 
-// TestNewDistSessionCompatibility 测试向后兼容的 NewDistSession
-func TestNewDistSessionCompatibility(t *testing.T) {
-	hub := NewHubRun()
-	defer hub.Close()
-
-	storage := NewMockStorage()
-
-	// 使用旧 API
-	session := NewDistSession(hub, storage, "192.168.1.1:8080", WithID("compat-test"))
-
-	// 验证返回的是 Session
-	if session == nil {
-		t.Fatal("NewDistSession returned nil")
-	}
-
-	// 验证 storage 和 addr 已设置
-	if session.storage != storage {
-		t.Error("Storage not set correctly")
-	}
-	if session.addr != "192.168.1.1:8080" {
-		t.Errorf("Addr = %v, want 192.168.1.1:8080", session.addr)
-	}
-}
