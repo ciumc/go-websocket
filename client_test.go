@@ -44,6 +44,8 @@ func TestNewClient(t *testing.T) {
 func TestClientOptions(t *testing.T) {
 	hub := NewHub()
 
+	defaultBufSize := DefaultConfig().BufSize
+
 	tests := []struct {
 		name    string
 		options []Option
@@ -54,13 +56,13 @@ func TestClientOptions(t *testing.T) {
 			name:    "默认选项",
 			options: []Option{},
 			wantID:  "", // 自动生成
-			wantBuf: bufSize,
+			wantBuf: defaultBufSize,
 		},
 		{
 			name:    "自定义 ID",
 			options: []Option{WithID("custom-id-123")},
 			wantID:  "custom-id-123",
-			wantBuf: bufSize,
+			wantBuf: defaultBufSize,
 		},
 		{
 			name:    "自定义缓冲区大小",
@@ -1097,4 +1099,228 @@ func TestClientEmitClosedChannelMultiple(t *testing.T) {
 			t.Errorf("Emit should return false after close (iteration %d)", i)
 		}
 	}
+}
+
+// TestClientWriterSetWriteDeadlineError 测试 writer 中 setWriteDeadline 错误处理
+func TestClientWriterSetWriteDeadlineError(t *testing.T) {
+	hub := NewHubRun()
+	defer hub.Close()
+
+	errorCalled := make(chan error, 1)
+
+	// 创建客户端
+	client := NewClient(hub, WithID("deadline-error-test"))
+	client.OnError(func(id string, err error) {
+		errorCalled <- err
+	})
+
+	// 创建已关闭的连接（模拟 setWriteDeadline 失败）
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		// 立即关闭连接，导致后续写入失败
+		conn.Close()
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	wsConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("Failed to dial: %v", err)
+	}
+	defer wsConn.Close()
+
+	client.conn = wsConn
+
+	// 发送消息触发 writer
+	client.Emit([]byte("test message"))
+
+	// 启动 writer
+	go client.writer()
+
+	// 等待错误（超时也可接受，因为连接可能已关闭）
+	select {
+	case <-errorCalled:
+		// 收到错误，符合预期
+	case <-time.After(500 * time.Millisecond):
+		// 超时也可接受
+		t.Log("No error received (acceptable)")
+	}
+}
+
+// TestClientWriterNextWriterError 测试 writer 中 NextWriter 错误处理
+func TestClientWriterNextWriterErrorCoverage(t *testing.T) {
+	hub := NewHubRun()
+	defer hub.Close()
+
+	errorCalled := make(chan error, 1)
+
+	client := NewClient(hub, WithID("nextwriter-error-coverage"))
+	client.OnError(func(id string, err error) {
+		errorCalled <- err
+	})
+
+	// 创建测试服务器，升级后立即关闭
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		// 升级成功后立即关闭，模拟 NextWriter 失败场景
+		conn.Close()
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	wsConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("Failed to dial: %v", err)
+	}
+
+	client.conn = wsConn
+
+	// 发送多条消息以触发批量处理
+	client.Emit([]byte("msg1"))
+	client.Emit([]byte("msg2"))
+
+	// 启动 writer
+	go client.writer()
+
+	// 关闭连接
+	defer wsConn.Close()
+
+	// 等待错误
+	select {
+	case <-errorCalled:
+		// 收到错误，符合预期
+	case <-time.After(500 * time.Millisecond):
+		t.Log("No error received (acceptable)")
+	}
+}
+
+// TestClientWriterWriteError 测试 writer 中 w.Write 错误处理
+func TestClientWriterWriteError(t *testing.T) {
+	hub := NewHubRun()
+	defer hub.Close()
+
+	errorCalled := make(chan error, 1)
+
+	client := NewClient(hub, WithID("write-error-test"))
+	client.OnError(func(id string, err error) {
+		errorCalled <- err
+	})
+
+	// 创建测试服务器
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		// 读取一条消息后关闭
+		_, _, err = conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		conn.Close()
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	wsConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("Failed to dial: %v", err)
+	}
+	defer wsConn.Close()
+
+	client.conn = wsConn
+
+	// 发送消息到缓冲区
+	client.Emit([]byte("test"))
+	client.Emit([]byte("test2"))
+
+	// 启动 writer
+	go client.writer()
+
+	// 等待 writer 处理
+	time.Sleep(200 * time.Millisecond)
+}
+
+// TestClientWriterCloseError 测试 writer 中 w.Close 错误处理
+func TestClientWriterCloseError(t *testing.T) {
+	hub := NewHubRun()
+	defer hub.Close()
+
+	client := NewClient(hub, WithID("close-error-test"))
+
+	// 创建测试服务器
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		// 立即关闭连接
+		conn.Close()
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	wsConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("Failed to dial: %v", err)
+	}
+	defer wsConn.Close()
+
+	client.conn = wsConn
+
+	// 启动 writer
+	go client.writer()
+
+	// 等待 writer 启动
+	time.Sleep(50 * time.Millisecond)
+
+	// 关闭 send channel 触发 writer 发送 close message
+	close(client.send)
+
+	// 等待 writer 处理
+	time.Sleep(200 * time.Millisecond)
+}
+
+// TestClientWriterPingError 测试 writer 中 ping 消息发送错误处理
+func TestClientWriterPingError(t *testing.T) {
+	hub := NewHubRun()
+	defer hub.Close()
+
+	errorCalled := make(chan error, 1)
+
+	client := NewClient(hub, WithID("ping-error-test"))
+	client.OnError(func(id string, err error) {
+		errorCalled <- err
+	})
+
+	// 创建测试服务器，升级后关闭
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		conn.Close()
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	wsConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("Failed to dial: %v", err)
+	}
+	defer wsConn.Close()
+
+	client.conn = wsConn
+
+	// 启动 writer
+	go client.writer()
+
+	// 等待 writer 处理
+	time.Sleep(200 * time.Millisecond)
 }

@@ -203,9 +203,9 @@ func (dc *DistClient) getTimeout() time.Duration {
 	return dc.timeout
 }
 
-// Emit 向指定客户端发送消息。
-// 先检查父 context 是否已取消，避免无意义的存储查询和 gRPC 调用。
-func (dc *DistClient) Emit(ctx context.Context, id string, message []byte) (bool, error) {
+// callRemote 是一个辅助函数，处理 Emit 和 Online 的公共逻辑：
+// 检查 context、获取地址、获取连接，然后调用指定的 gRPC 方法。
+func (dc *DistClient) callRemote(ctx context.Context, id string, fn func(websocketpb.WebsocketClient, context.Context) (bool, error)) (bool, error) {
 	// 先检查 context 是否已取消，快速失败
 	if ctx.Err() != nil {
 		return false, fmt.Errorf("context cancelled: %w", ctx.Err())
@@ -228,52 +228,42 @@ func (dc *DistClient) Emit(ctx context.Context, id string, message []byte) (bool
 	}
 
 	client := websocketpb.NewWebsocketClient(conn)
-	resp, err := client.Emit(ctx, &websocketpb.EmitRequest{
-		Id:   id,
-		Data: message,
+	return fn(client, ctx)
+}
+
+// Emit 向指定客户端发送消息。
+// 先检查父 context 是否已取消，避免无意义的存储查询和 gRPC 调用。
+func (dc *DistClient) Emit(ctx context.Context, id string, message []byte) (bool, error) {
+	return dc.callRemote(ctx, id, func(client websocketpb.WebsocketClient, ctx context.Context) (bool, error) {
+		resp, err := client.Emit(ctx, &websocketpb.EmitRequest{
+			Id:   id,
+			Data: message,
+		})
+		if err != nil {
+			return false, fmt.Errorf("grpc emit: %w", err)
+		}
+		return resp.Success, nil
 	})
-	if err != nil {
-		return false, fmt.Errorf("grpc emit: %w", err)
-	}
-	return resp.Success, nil
 }
 
 // Online 检查客户端是否在线。
 // 通过存储查询客户端所在节点，然后向该节点发送在线检查请求。
 // 先检查父 context 是否已取消，避免无意义的存储查询和 gRPC 调用。
 func (dc *DistClient) Online(ctx context.Context, id string) (bool, error) {
-	// 先检查 context 是否已取消，快速失败
-	if ctx.Err() != nil {
-		return false, fmt.Errorf("context cancelled: %w", ctx.Err())
-	}
-
-	addr, err := dc.storage.Get(id)
-	if err != nil {
-		return false, fmt.Errorf("storage get: %w", err)
-	}
-	if addr == "" {
-		return false, fmt.Errorf("client %s not found", id)
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, dc.getTimeout())
-	defer cancel()
-
-	conn, err := dc.pool.get(addr)
-	if err != nil {
-		return false, fmt.Errorf("grpc connect: %w", err)
-	}
-
-	client := websocketpb.NewWebsocketClient(conn)
-	resp, err := client.Online(ctx, &websocketpb.OnlineRequest{Id: id})
-	if err != nil {
-		return false, fmt.Errorf("grpc online: %w", err)
-	}
-	return resp.Online, nil
+	return dc.callRemote(ctx, id, func(client websocketpb.WebsocketClient, ctx context.Context) (bool, error) {
+		resp, err := client.Online(ctx, &websocketpb.OnlineRequest{Id: id})
+		if err != nil {
+			return false, fmt.Errorf("grpc online: %w", err)
+		}
+		return resp.Online, nil
+	})
 }
 
 // Broadcast 广播消息到所有节点。
 // 首先从存储获取所有节点地址，去重后向每个节点发送广播请求。
 // 先检查父 context 是否已取消，避免无意义的存储查询和 gRPC 调用。
+// 返回成功发送的节点数量和可能的部分错误。
+// 即使部分节点失败，也会返回已成功发送的计数。
 func (dc *DistClient) Broadcast(ctx context.Context, message []byte) (int64, error) {
 	// 先检查 context 是否已取消，快速失败
 	if ctx.Err() != nil {
@@ -295,18 +285,27 @@ func (dc *DistClient) Broadcast(ctx context.Context, message []byte) (int64, err
 	defer cancel()
 
 	var count int64
+	var errs []error
+
 	for addr := range uniqueAddrs {
 		conn, err := dc.pool.get(addr)
 		if err != nil {
+			errs = append(errs, fmt.Errorf("node %s: connect failed: %w", addr, err))
 			continue
 		}
 
 		client := websocketpb.NewWebsocketClient(conn)
 		resp, err := client.Broadcast(ctx, &websocketpb.BroadcastRequest{Data: message})
 		if err != nil {
+			errs = append(errs, fmt.Errorf("node %s: broadcast failed: %w", addr, err))
 			continue
 		}
 		count += resp.Count
+	}
+
+	// 如果有错误，返回聚合错误信息
+	if len(errs) > 0 {
+		return count, fmt.Errorf("broadcast completed with %d errors: %v", len(errs), errs[0])
 	}
 
 	return count, nil

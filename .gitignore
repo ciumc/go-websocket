@@ -3,3 +3,4 @@
 .claude
 docs
 AGENTS.md
+*.out

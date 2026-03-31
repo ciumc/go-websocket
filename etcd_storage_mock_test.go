@@ -1,6 +1,7 @@
 package websocket
 
 import (
+	"maps"
 	"testing"
 )
 
@@ -43,11 +44,7 @@ func (m *MockEtcdStorage) delKeys(keys []string) error {
 }
 
 func (m *MockEtcdStorage) All() (map[string]string, error) {
-	result := make(map[string]string)
-	for k, v := range m.data {
-		result[k] = v
-	}
-	return result, nil
+	return maps.Clone(m.data), nil
 }
 
 // TestMockEtcdStorage 测试 mock etcd 存储实现

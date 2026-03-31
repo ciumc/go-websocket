@@ -135,8 +135,9 @@ func (s *EtcdStorage) delKeys(keys []string) error {
 }
 
 // All 获取当前前缀下的所有键值对。
+// 注意：返回的键已移除前缀，与 Get/Set 方法的键保持一致。
 // 返回值:
-//   - map[string]string: 包含所有键值对的映射表
+//   - map[string]string: 包含所有键值对的映射表（键不含前缀）
 //   - error: 操作过程中发生的错误（如果有）
 func (s *EtcdStorage) All() (map[string]string, error) {
 	result := make(map[string]string)
@@ -147,8 +148,14 @@ func (s *EtcdStorage) All() (map[string]string, error) {
 		return nil, fmt.Errorf("etcd get all with prefix %s: %w", s.prefix, err)
 	}
 	// 遍历响应中的键值对并填充到结果中
+	// 移除前缀以保持与 Get/Set 方法的行为一致
 	for _, kv := range resp.Kvs {
-		result[string(kv.Key)] = string(kv.Value)
+		key := string(kv.Key)
+		// 移除前缀，确保返回的键与 Get/Set 使用的键一致
+		if len(key) > len(s.prefix) {
+			key = key[len(s.prefix):]
+		}
+		result[key] = string(kv.Value)
 	}
 	return result, nil
 }

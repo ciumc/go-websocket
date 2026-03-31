@@ -3,6 +3,7 @@ package websocket
 import (
 	"context"
 	"errors"
+	"maps"
 	"sync"
 	"testing"
 	"time"
@@ -65,11 +66,7 @@ func (m *MockStorage) Clear(host string) error {
 func (m *MockStorage) All() (map[string]string, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	result := make(map[string]string, len(m.data))
-	for k, v := range m.data {
-		result[k] = v
-	}
-	return result, nil
+	return maps.Clone(m.data), nil
 }
 
 // TestMockStorage 测试 MockStorage 的所有方法

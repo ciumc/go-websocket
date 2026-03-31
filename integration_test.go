@@ -15,6 +15,7 @@ func TestSessionConnIntegration(t *testing.T) {
 	hub := NewHubRunWithConfig(
 		WithWriteWait(5*time.Second),
 		WithPongWait(30*time.Second),
+		WithPingPeriod(27*time.Second), // PingPeriod 必须小于 PongWait
 	)
 	defer hub.Close()
 

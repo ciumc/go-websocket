@@ -1,12 +1,24 @@
 package websocket
 
 import (
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
 
 	"github.com/gorilla/websocket"
 )
+
+// safeCloseChannel 安全地关闭 channel，使用 recover 防止重复关闭 panic。
+// 如果发生 panic（如 channel 已关闭），会记录日志以便诊断。
+func safeCloseChannel(closeFn func(), name string) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("hub: %s channel double-close detected (should not happen): %v", name, r)
+		}
+	}()
+	closeFn()
+}
 
 // Hub 维护活跃客户端集合并向客户端广播消息。
 // 它作为 WebSocket 服务器的中央消息代理。
@@ -52,10 +64,16 @@ func NewHub() *Hub {
 
 // NewHubWithConfig 使用配置选项创建一个新的 Hub 实例。
 // 如果没有提供选项，使用 DefaultConfig。
+// 配置会在创建 Hub 前进行验证，如果配置无效会 panic。
 func NewHubWithConfig(opts ...HubOption) *Hub {
 	config := DefaultConfig()
 	for _, opt := range opts {
 		opt(&config)
+	}
+
+	// 验证配置有效性
+	if err := config.Validate(); err != nil {
+		panic(fmt.Sprintf("invalid hub config: %v", err))
 	}
 
 	// 使用 config.BufSize 作为 channel 缓冲区大小
@@ -162,32 +180,11 @@ func (h *Hub) Run() {
 		h.clients = make(map[string]*Client)
 		h.clientsLock.Unlock()
 
-		// 安全地关闭所有 channel（使用 recover 防止重复关闭 panic）
-		// 注意：重复关闭不应发生，如果发生则记录日志以便诊断
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("hub: broadcast channel double-close detected (should not happen): %v", r)
-				}
-			}()
-			close(h.broadcast)
-		}()
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("hub: register channel double-close detected (should not happen): %v", r)
-				}
-			}()
-			close(h.register)
-		}()
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("hub: unregister channel double-close detected (should not happen): %v", r)
-				}
-			}()
-			close(h.unregister)
-		}()
+		// 安全地关闭所有 channel
+		// 使用辅助函数避免重复的 recover 代码
+		safeCloseChannel(func() { close(h.broadcast) }, "broadcast")
+		safeCloseChannel(func() { close(h.register) }, "register")
+		safeCloseChannel(func() { close(h.unregister) }, "unregister")
 	}()
 
 	for {
@@ -220,12 +217,18 @@ func (h *Hub) Run() {
 				case client.send <- message:
 				default:
 					// 如果客户端无法接收消息，可能已断开连接，移除它
+					// 使用双重检查避免竞态条件：确保客户端仍在 map 中
 					h.clientsLock.Lock()
-					delete(h.clients, client.id)
-					h.clientsLock.Unlock()
-					client.closeSend()
-					if client.conn != nil {
-						_ = client.conn.Close()
+					if _, ok := h.clients[client.id]; ok {
+						delete(h.clients, client.id)
+						h.clientsLock.Unlock()
+						client.closeSend()
+						if client.conn != nil {
+							_ = client.conn.Close()
+						}
+					} else {
+						// 客户端已被其他地方（如 unregister channel）删除
+						h.clientsLock.Unlock()
 					}
 				}
 			}

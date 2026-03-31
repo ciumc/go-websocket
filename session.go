@@ -31,6 +31,9 @@ type Session struct {
 // NewSession 创建会话（自动检测模式）。
 // 单节点模式：hub + opts
 // 分布式模式：hub + WithStorage(storage) + WithAddr(addr) + opts
+//
+// 注意：分布式模式下必须同时提供 storage 和 addr，否则会引发 panic。
+// 这是为了确保配置完整性，避免运行时错误。
 func NewSession(hub *Hub, opts ...SessionOption) *Session {
 	s := &Session{
 		hub:    hub,
@@ -39,6 +42,14 @@ func NewSession(hub *Hub, opts ...SessionOption) *Session {
 
 	for _, opt := range opts {
 		opt(s)
+	}
+
+	// 验证分布式模式配置完整性
+	if s.storage != nil && s.addr == "" {
+		panic("distributed mode requires addr: use WithAddr() to set the node address")
+	}
+	if s.storage == nil && s.addr != "" {
+		panic("addr provided without storage: use WithStorage() to enable distributed mode")
 	}
 
 	// 生成 ID（如果未设置）
@@ -53,14 +64,16 @@ func NewSession(hub *Hub, opts ...SessionOption) *Session {
 }
 
 // newClient 内部函数，创建 Client
+// 使用 bufSize 字段确保 channel 在正确时机创建
 func newClient(hub *Hub, id string, bufSize int) *Client {
 	if bufSize <= 0 {
 		bufSize = hub.Config().BufSize
 	}
 	return &Client{
-		hub:  hub,
-		id:   id,
-		send: make(chan []byte, bufSize),
+		hub:     hub,
+		id:      id,
+		bufSize: bufSize,
+		send:    make(chan []byte, bufSize),
 	}
 }
 

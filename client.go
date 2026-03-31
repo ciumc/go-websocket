@@ -16,24 +16,6 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// 常量保留用于向后兼容，但实际使用 Config 中的值
-const (
-	// writeWait 是向对等方写入消息的时间限制。
-	writeWait = 10 * time.Second
-
-	// pongWait 是从对等方读取下一个 pong 消息的时间限制。
-	pongWait = 60 * time.Second
-
-	// pingPeriod 是向对等方发送 ping 的周期。必须小于 pongWait。
-	pingPeriod = (pongWait * 9) / 10
-
-	// maxMessageSize 是允许从对等方接收的最大消息大小。
-	maxMessageSize = 512
-
-	// bufSize 是出站消息的发送缓冲区大小。
-	bufSize = 256
-)
-
 var (
 	// newline 表示换行符的字节形式。
 	newline = []byte{'\n'}
@@ -43,6 +25,7 @@ var (
 )
 
 // upgrader 保留用于向后兼容，但新代码应使用 Hub.Upgrader()
+// Deprecated: 此全局变量将在未来版本中移除，请使用 Hub 的 Upgrader() 方法。
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
@@ -79,6 +62,9 @@ type Client struct {
 
 	// config 是配置覆盖（可选，用于 Session）
 	config *Config
+
+	// bufSize 是 send channel 的缓冲区大小（在创建 channel 前使用）
+	bufSize int
 }
 
 // effectiveConfig 获取有效配置。
@@ -277,13 +263,12 @@ func WithID(id string) Option {
 }
 
 // WithBufSize 设置 send channel 的缓冲区大小。
-// 必须在 NewClient 之前调用，因为 channel 在创建后无法更改大小。
+// 此选项在 NewClient 中应用，channel 在所有选项处理后才创建，
+// 因此不会出现竞态条件。
 func WithBufSize(size int) Option {
 	return func(c *Client) {
-		// 注意：这里只是标记，实际的 channel 创建在 NewClient 中处理
-		// 由于 channel 已经创建，我们需要重新创建它
 		if size > 0 {
-			c.send = make(chan []byte, size)
+			c.bufSize = size
 		}
 	}
 }
@@ -305,20 +290,32 @@ func WithCheckOrigin(fn func(r *http.Request) bool) Option {
 // NewClient 使用给定的 hub 和选项创建一个新的 Client 实例。
 // 如果未通过选项提供 ID，将生成 UUID。
 // 客户端在调用 Conn() 之前不会连接。
+//
+// 选项在 channel 创建前应用，确保 WithBufSize 等选项不会导致竞态条件。
 func NewClient(hub *Hub, opts ...Option) *Client {
 	cfg := hub.Config()
 	cli := &Client{
-		hub:  hub,
-		send: make(chan []byte, cfg.BufSize),
+		hub: hub,
 	}
 
+	// 先应用所有选项
 	for _, opt := range opts {
 		opt(cli)
 	}
 
+	// 生成 ID（如果未设置）
 	if cli.id == "" {
 		cli.id = strings.ReplaceAll(uuid.NewString(), "-", "")
 	}
+
+	// 确定缓冲区大小：选项 > Hub 配置
+	bufSize := cfg.BufSize
+	if cli.bufSize > 0 {
+		bufSize = cli.bufSize
+	}
+
+	// 最后创建 channel，避免竞态条件
+	cli.send = make(chan []byte, bufSize)
 
 	return cli
 }

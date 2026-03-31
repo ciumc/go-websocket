@@ -13,6 +13,7 @@ import (
 	"github.com/ciumc/go-websocket/websocketpb"
 	"github.com/gorilla/websocket"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 )
 
@@ -261,14 +262,11 @@ func setupTestGRPCServer(t *testing.T, hub *Hub) (*grpc.ClientConn, func()) {
 		}
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	conn, err := grpc.DialContext(ctx, "passthrough:///bufnet",
+	conn, err := grpc.NewClient("passthrough:///bufnet",
 		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
 			return listener.Dial()
 		}),
-		grpc.WithInsecure(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	if err != nil {
 		t.Fatalf("Failed to dial bufnet: %v", err)
@@ -1156,5 +1154,145 @@ func TestDistClientBroadcastContextCancelled(t *testing.T) {
 	}
 	if count != 0 {
 		t.Error("Broadcast() should return count = 0 when context is cancelled")
+	}
+}
+
+// TestGrpcPoolGet 测试 grpcPool.get() 连接创建
+func TestGrpcPoolGet(t *testing.T) {
+	// 使用 newGrpcPool 确保 done channel 已初始化
+	p := newGrpcPool()
+	defer p.close()
+
+	// 测试获取连接（grpc.NewClient 是异步的，不会立即失败）
+	conn, err := p.get("127.0.0.1:9999")
+	if err != nil {
+		t.Errorf("get() unexpected error: %v", err)
+	}
+	if conn == nil {
+		t.Error("get() should return a connection")
+	} else {
+		defer conn.Close()
+	}
+
+	// 验证连接已添加到池中
+	p.mu.RLock()
+	lenConns := len(p.conns)
+	p.mu.RUnlock()
+
+	if lenConns != 1 {
+		t.Errorf("pool should have 1 connection, got %d", lenConns)
+	}
+}
+
+// TestGrpcPoolGetConnectionReuse 测试 grpcPool.get() 连接复用
+func TestGrpcPoolGetConnectionReuse(t *testing.T) {
+	// 使用 newGrpcPool 确保 done channel 已初始化
+	p := newGrpcPool()
+	defer p.close()
+
+	addr := "127.0.0.1:9999"
+
+	// 第一次获取连接
+	conn1, err := p.get(addr)
+	if err != nil {
+		t.Fatalf("get() unexpected error: %v", err)
+	}
+	defer conn1.Close()
+
+	// 第二次获取应该返回同一个连接（复用）
+	conn2, err := p.get(addr)
+	if err != nil {
+		t.Fatalf("get() unexpected error on retry: %v", err)
+	}
+
+	if conn1 != conn2 {
+		t.Error("get() should return the same connection (reuse)")
+	}
+
+	// 验证池中只有一个连接
+	p.mu.RLock()
+	lenConns := len(p.conns)
+	p.mu.RUnlock()
+
+	if lenConns != 1 {
+		t.Errorf("pool should have 1 connection, got %d", lenConns)
+	}
+}
+
+// TestGrpcPoolGetConnectionStateCheck 测试 grpcPool.get() 连接状态检查
+func TestGrpcPoolGetConnectionStateCheck(t *testing.T) {
+	p := newGrpcPool()
+	defer p.close()
+
+	addr := "127.0.0.1:9998"
+
+	// 第一次获取连接
+	conn1, err := p.get(addr)
+	if err != nil {
+		t.Fatalf("get() unexpected error: %v", err)
+	}
+	defer conn1.Close()
+
+	// 模拟连接状态变为 TransientFailure，触发重建
+	// 通过删除连接来模拟
+	p.mu.Lock()
+	delete(p.conns, addr)
+	p.mu.Unlock()
+
+	// 再次调用 get 应该创建新连接
+	conn2, err := p.get(addr)
+	if err != nil {
+		t.Fatalf("get() unexpected error on retry: %v", err)
+	}
+	defer conn2.Close()
+
+	// 验证是新连接
+	if conn1 == conn2 {
+		t.Error("get() should return a new connection after deletion")
+	}
+}
+
+// TestGrpcPoolGetInvalidConnection 测试 grpcPool.get() 获取无效连接
+func TestGrpcPoolGetInvalidConnection(t *testing.T) {
+	p := newGrpcPool()
+	defer p.close()
+
+	// 获取一个有效地址的连接（grpc 是异步连接，不会立即失败）
+	conn, err := p.get("127.0.0.1:9997")
+	if err != nil {
+		t.Errorf("get() unexpected error: %v", err)
+	} else {
+		defer conn.Close()
+	}
+
+	// 验证连接已添加到池中
+	p.mu.RLock()
+	lenConns := len(p.conns)
+	p.mu.RUnlock()
+
+	if lenConns != 1 {
+		t.Errorf("pool should have 1 connection, got %d", lenConns)
+	}
+}
+
+// TestGrpcPoolCleanup 测试 grpcPool 清理过期连接
+func TestGrpcPoolCleanup(t *testing.T) {
+	p := newGrpcPool()
+	defer p.close()
+
+	// 验证清理 goroutine 已启动（不 panic 即可）
+	// 给一点时间让清理 goroutine 运行
+	time.Sleep(10 * time.Millisecond)
+
+	// 手动触发一次清理（通过访问内部方法）
+	p.cleanExpired()
+
+	// 验证清理后池为空
+	p.mu.RLock()
+	lenConns := len(p.conns)
+	p.mu.RUnlock()
+
+	if lenConns != 0 {
+		t.Errorf("pool should be empty after cleanup, got %d", lenConns)
 	}
 }

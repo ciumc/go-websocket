@@ -11,12 +11,6 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// newTestClient 创建一个用于测试的客户端，使用 WebSocket 测试服务器
-func newTestClient(t *testing.T, hub *Hub, id string) *Client {
-	client := NewClient(hub, WithID(id))
-	return client
-}
-
 // TestNewHub 测试构造函数，确认各 channel 和 map 正确初始化
 func TestNewHub(t *testing.T) {
 	h := NewHub()

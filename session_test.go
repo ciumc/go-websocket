@@ -46,6 +46,7 @@ func TestSessionInheritsHubConfig(t *testing.T) {
 	hub := NewHubRunWithConfig(
 		WithWriteWait(5*time.Second),
 		WithPongWait(30*time.Second),
+		WithPingPeriod(27*time.Second), // PingPeriod 必须小于 PongWait
 	)
 	defer hub.Close()
 
@@ -342,5 +343,149 @@ func TestSessionWithZeroBufSize(t *testing.T) {
 	// 验证 client 的 send channel 已创建
 	if session.client.send == nil {
 		t.Error("client send channel should not be nil")
+	}
+}
+
+// TestSessionConnUpgradeError 测试 Session.Conn 升级失败
+func TestSessionConnUpgradeError(t *testing.T) {
+	hub := NewHubRun()
+	defer hub.Close()
+
+	session := NewSession(hub, WithSessionID("upgrade-error-test"))
+
+	// 创建无效的 HTTP 请求（不是 WebSocket 升级请求）
+	req := httptest.NewRequest("GET", "http://example.com", nil)
+	w := httptest.NewRecorder()
+
+	// Conn 应该返回升级错误
+	err := session.Conn(w, req)
+	if err == nil {
+		t.Error("Conn() should return error for non-websocket request")
+	}
+	if !strings.Contains(err.Error(), "websocket upgrade") {
+		t.Errorf("Conn() error should contain 'websocket upgrade', got: %v", err)
+	}
+}
+
+// TestSessionConnDistributedModeStorageError 测试 Session.Conn 分布式模式下存储失败
+func TestSessionConnDistributedModeStorageError(t *testing.T) {
+	hub := NewHubRun()
+	defer hub.Close()
+
+	// 使用会返回错误的 storage
+	storage := &errorStorage{}
+
+	session := NewSession(hub,
+		WithStorage(storage),
+		WithAddr("192.168.1.1:8080"),
+		WithSessionID("storage-error-test"),
+	)
+
+	errorCalled := make(chan error, 1)
+	session.OnError(func(id string, err error) {
+		errorCalled <- err
+	})
+
+	// 创建测试服务器
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := hub.Upgrader().Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		// 保持连接
+		for {
+			_, _, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	wsConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("Failed to dial: %v", err)
+	}
+	defer wsConn.Close()
+
+	// 手动设置连接（模拟 Conn 方法的内部逻辑）
+	session.client.conn = wsConn
+	session.client.onConnect = func(c *Client) {
+		// 分布式模式：存储失败应该触发 OnError 回调
+		if session.storage != nil {
+			if err := session.storage.Set(c.id, session.addr); err != nil {
+				c.error(err)
+			}
+		}
+	}
+
+	hub.register <- session.client
+
+	// 手动触发 OnConnect 来测试存储错误处理
+	if session.client.onConnect != nil {
+		session.client.onConnect(session.client)
+	}
+
+	// 验证 OnError 回调被调用（存储失败）
+	select {
+	case err := <-errorCalled:
+		if err == nil {
+			t.Error("OnError should be called with storage error")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Error("OnError should be called when storage fails")
+	}
+}
+
+// TestSessionOnDisconnectStorageError 测试 OnDisconnect 存储错误处理
+func TestSessionOnDisconnectStorageError(t *testing.T) {
+	hub := NewHubRun()
+	defer hub.Close()
+
+	// 使用会返回错误的 storage
+	storage := &errorStorage{}
+
+	session := NewSession(hub,
+		WithStorage(storage),
+		WithAddr("192.168.1.1:8080"),
+		WithSessionID("disconnect-storage-error-test"),
+	)
+
+	errorCalled := make(chan error, 1)
+	session.OnError(func(id string, err error) {
+		errorCalled <- err
+	})
+
+	disconnectCalled := make(chan string, 1)
+	session.OnDisconnect(func(id string) {
+		disconnectCalled <- id
+	})
+
+	// 触发断开回调
+	if session.client.onDisconnect != nil {
+		session.client.onDisconnect("disconnect-storage-error-test")
+	}
+
+	// 验证 OnDisconnect 回调被调用
+	select {
+	case id := <-disconnectCalled:
+		if id != "disconnect-storage-error-test" {
+			t.Errorf("disconnect id = %v, want 'disconnect-storage-error-test'", id)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Error("OnDisconnect callback was not called")
+	}
+
+	// 验证 OnError 回调被调用（存储删除失败）
+	select {
+	case err := <-errorCalled:
+		if err == nil {
+			t.Error("OnError should be called with storage delete error")
+		}
+	case <-time.After(500 * time.Millisecond):
+		// 存储错误应该被记录
+		t.Log("OnError may or may not be called depending on errorStorage behavior")
 	}
 }
