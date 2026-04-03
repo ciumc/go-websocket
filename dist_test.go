@@ -1047,3 +1047,67 @@ func TestGrpcPoolCleanup(t *testing.T) {
 		t.Errorf("pool should be empty after cleanup, got %d", lenConns)
 	}
 }
+
+// TestGrpcPoolCleanupWithNilConn 测试清理时连接为 nil 的情况
+func TestGrpcPoolCleanupWithNilConn(t *testing.T) {
+	p := newGrpcPool()
+	defer p.close()
+
+	// 手动添加一个 nil 连接的条目（模拟过期且 conn 为 nil 的情况）
+	p.mu.Lock()
+	p.conns["test-addr"] = &pooledConn{
+		conn:     nil,
+		lastUsed: time.Now().Add(-10 * time.Minute).UnixNano(), // 已过期
+	}
+	p.mu.Unlock()
+
+	// 手动触发清理
+	p.cleanExpired()
+
+	// 验证 nil 连接的条目已被删除
+	p.mu.RLock()
+	_, exists := p.conns["test-addr"]
+	p.mu.RUnlock()
+
+	if exists {
+		t.Error("pool should delete entry with nil conn")
+	}
+}
+
+// TestGrpcPoolCleanupMixedConnections 测试清理混合连接（有过期的，有未过期的）
+func TestGrpcPoolCleanupMixedConnections(t *testing.T) {
+	p := newGrpcPool()
+	defer p.close()
+
+	// 获取一个真实连接
+	conn, err := p.get("127.0.0.1:9996")
+	if err != nil {
+		t.Fatalf("get() failed: %v", err)
+	}
+
+	// 手动修改连接的最后使用时间，使其过期
+	p.mu.Lock()
+	p.conns["127.0.0.1:9996"].lastUsed = time.Now().Add(-10 * time.Minute).UnixNano()
+	// 添加一个未过期的新连接条目
+	p.conns["127.0.0.1:9995"] = &pooledConn{
+		conn:     conn,
+		lastUsed: time.Now().UnixNano(), // 未过期
+	}
+	p.mu.Unlock()
+
+	// 触发清理
+	p.cleanExpired()
+
+	// 验证过期的被删除，未过期的保留
+	p.mu.RLock()
+	_, expiredExists := p.conns["127.0.0.1:9996"]
+	_, freshExists := p.conns["127.0.0.1:9995"]
+	p.mu.RUnlock()
+
+	if expiredExists {
+		t.Error("expired connection should be deleted")
+	}
+	if !freshExists {
+		t.Error("fresh connection should be kept")
+	}
+}

@@ -484,4 +484,44 @@ func TestClearHelper(t *testing.T) {
 			t.Error("clearHelper() expected error, got nil")
 		}
 	})
+
+	t.Run("All returns error", func(t *testing.T) {
+		// 使用一个会返回错误的 storage
+		errStorage := &mockErrorStorage{}
+
+		delFunc := func(keys []string) error {
+			return nil
+		}
+
+		err := clearHelper(errStorage, "h1", delFunc)
+		if err == nil {
+			t.Error("clearHelper() expected error when All() fails, got nil")
+		}
+		if err.Error() != "storage all error" {
+			t.Errorf("clearHelper() error = %v, want 'storage all error'", err)
+		}
+	})
+}
+
+// mockErrorStorage 是一个总是返回错误的 storage 实现（用于测试）
+type mockErrorStorage struct{}
+
+func (e *mockErrorStorage) Set(key string, value string) error {
+	return errors.New("storage error")
+}
+
+func (e *mockErrorStorage) Get(key string) (string, error) {
+	return "", errors.New("storage error")
+}
+
+func (e *mockErrorStorage) Del(key ...string) error {
+	return errors.New("storage error")
+}
+
+func (e *mockErrorStorage) Clear(host string) error {
+	return errors.New("storage error")
+}
+
+func (e *mockErrorStorage) All() (map[string]string, error) {
+	return nil, errors.New("storage all error")
 }
